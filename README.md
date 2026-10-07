@@ -1,0 +1,1 @@
+# ha-20i0-adpter
