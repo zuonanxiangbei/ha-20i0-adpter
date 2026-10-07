@@ -1,0 +1,13 @@
+{
+  "domain": "huawei_20i0_adapter",
+  "name": "华为智选 欧普智能台灯 Pro (20I0) 适配器安装器",
+  "integration_type": "service",
+  "config_flow": true,
+  "iot_class": "local_push",
+  "version": "1.1.0",
+  "documentation": "https://github.com/xiasi0/ha-huawei-smarthome",
+  "issue_tracker": "https://github.com/xiasi0/ha-huawei-smarthome/issues",
+  "dependencies": [],
+  "codeowners": [],
+  "requirements": []
+}

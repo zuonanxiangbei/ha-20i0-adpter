@@ -1,0 +1,11 @@
+{
+  "title": "华为智选 欧普智能台灯 Pro (20I0) 适配器安装器",
+  "config": {
+    "step": {
+      "user": {
+        "title": "安装台灯适配器（20I0）",
+        "description": "点击「提交」即可自动安装适配器文件。完成后请重启 Home Assistant，再到 Huawei SmartHome 集成点「重新加载」。"
+      }
+    }
+  }
+}
