@@ -298,22 +298,35 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
 
         _LOGGER.error("IFACE| SIOCGIFCONF list: %s" % (_ifaces,))
 
-        _pick = None
-        for _n, _ip in _ifaces:
-            if (_ip.startswith("192.168.") or _ip.startswith("10.")
-                    or _ip.startswith("172.")):
-                _pick = (_n, _ip)
-                break
-        if _pick is None and _ifaces:
-            _pick = _ifaces[0]
+        # 选择优先级：wlan0 > wlan* > eth* > ap* > 其他（排除 lo）
+        # 注：proot 里 SIOCGIFCONF 常只返回 lo，故以 if_nameindex 为主。
+        try:
+            _names = [n for _, n in socket.if_nameindex()]
+        except Exception as _e:
+            _LOGGER.error("IFACE| if_nameindex retry failed: %s" % _e)
+            _names = [n for n, _ in _ifaces]
 
-        if _pick is not None:
+        _cands = []
+        for _p in ("wlan0",):
+            if _p in _names:
+                _cands.append(_p)
+        for _pfx in ("wlan", "eth", "ap"):
+            for _n in _names:
+                if _n.startswith(_pfx) and _n not in _cands:
+                    _cands.append(_n)
+        for _n in _names:
+            if _n != "lo" and _n not in _cands:
+                _cands.append(_n)
+
+        _pickname = _cands[0] if _cands else None
+        _LOGGER.error("IFACE| candidates=%s -> pick=%r" % (_cands, _pickname))
+
+        if _pickname is not None:
             try:
                 lib.HILINK_SetPreferredIface.argtypes = [c_char_p]
                 lib.HILINK_SetPreferredIface.restype = c_int
-                _r = lib.HILINK_SetPreferredIface(_pick[0].encode())
-                _LOGGER.error("IFACE| SetPreferredIface(%r, ip=%s) rlt=%r"
-                              % (_pick[0], _pick[1], _r))
+                _r = lib.HILINK_SetPreferredIface(_pickname.encode())
+                _LOGGER.error("IFACE| SetPreferredIface(%r) rlt=%r" % (_pickname, _r))
             except Exception as _e:
                 _LOGGER.error("IFACE| SetPreferredIface EXC %s" % _e)
         else:
