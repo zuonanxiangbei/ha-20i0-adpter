@@ -276,13 +276,13 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             _maxlen = 8192
             _buf = _ar.array("B", b"\0" * _maxlen)
             _SIOCGIFCONF = 0x8912
-            _ifc = _st.pack("iL", _maxlen, _buf.buffer_info()[0])
+            _ifc = _st.pack("i4xL", _maxlen, _buf.buffer_info()[0])
             _res = _fc.ioctl(_sk.fileno(), _SIOCGIFCONF, _ifc)
-            _outlen = _st.unpack("iL", _res)[0]
+            _outlen = _st.unpack("i4xL", _res)[0]
             _raw = _buf.tobytes()[:_outlen]
-            for _i in range(0, len(_raw), 32):
-                _rec = _raw[_i:_i + 32]
-                if len(_rec) < 32:
+            for _i in range(0, len(_raw), 40):
+                _rec = _raw[_i:_i + 40]
+                if len(_rec) < 40:
                     break
                 _nm = _rec[:16].split(b"\0")[0].decode("utf-8", "replace")
                 _ip = socket.inet_ntoa(_rec[20:24])
@@ -358,16 +358,41 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             if not _stat.S_ISSOCK(_stt.st_mode):
                 continue
             _info = {"ino": _stt.st_ino}
-            for _name, _opt in (("type", 3), ("domain", 39)):
+            for _name, _lvl, _opt, _ln_ in (("type", 1, 3, 4),
+                                            ("domain", 1, 39, 4)):
                 _v = _ct.c_int(0)
-                _vl = _ct.c_int(4)
+                _vl = _ct.c_int(_ln_)
                 try:
-                    _rc = _lc.getsockopt(_ct.c_int(_fd), _ct.c_int(1),
+                    _rc = _lc.getsockopt(_ct.c_int(_fd), _ct.c_int(_lvl),
                                          _ct.c_int(_opt), _ct.byref(_v),
                                          _ct.byref(_vl))
                     _info[_name] = _v.value if _rc == 0 else "rc=%s" % _rc
                 except Exception:
                     _info[_name] = "EXC"
+            # SO_ERROR + TCP_INFO.tcpi_state：判断到路由器的连接到底通没通
+            _eb = _ct.c_int(0)
+            _el = _ct.c_int(4)
+            try:
+                _rc = _lc.getsockopt(_ct.c_int(_fd), _ct.c_int(1), _ct.c_int(4),
+                                     _ct.byref(_eb), _ct.byref(_el))
+                if _rc == 0:
+                    _info["so_err"] = _eb.value
+            except Exception:
+                pass
+            _tb = _ct.create_string_buffer(128)
+            _tl = _ct.c_int(128)
+            try:
+                _rc = _lc.getsockopt(_ct.c_int(_fd), _ct.c_int(6), _ct.c_int(11),
+                                     _tb, _ct.byref(_tl))
+                if _rc == 0 and _tl.value >= 1:
+                    _stt_s = _tb.raw[0]
+                    _names = {1: "ESTAB", 2: "SYN_SENT", 3: "SYN_RECV",
+                              4: "FIN_WAIT1", 5: "FIN_WAIT2", 6: "TIME_WAIT",
+                              7: "CLOSE", 8: "CLOSE_WAIT", 9: "LAST_ACK",
+                              10: "LISTEN", 11: "CLOSING"}
+                    _info["tcp"] = _names.get(_stt_s, str(_stt_s))
+            except Exception:
+                pass
             for _name, _fn in (("local", _lc.getsockname),
                                ("peer", _lc.getpeername)):
                 _buf = _ct.create_string_buffer(128)
