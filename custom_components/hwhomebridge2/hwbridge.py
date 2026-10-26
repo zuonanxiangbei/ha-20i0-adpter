@@ -13,6 +13,7 @@ hwbridge.py - 核心桥接逻辑
 """
 
 import os
+import copy
 import shutil
 import asyncio
 import platform
@@ -1206,6 +1207,17 @@ def _delayed_resync_all_devices():
     if service_router is None:
         return
     _LOGGER.info("Starting delayed state re-sync for all devices")
+
+    # 补漏扫描：HA 触发 EVENT_HOMEASSISTANT_STARTED 的那一刻，部分集成
+    # （典型如 xiaomi_home 这类云端轮询）的设备实体还没建好，
+    # er.async_entries_for_device 返回空列表 → 整台设备被跳过，
+    # 而且之后不会自动补。这里再扫一遍，已注册的会被 registered_device_ids 挡掉。
+    if ghass is not None:
+        try:
+            _discover_and_register_devices(ghass)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error(f"Delayed device discovery failed: {exc}")
+
     for vd in service_router.sn_manager.get_all_devices():
         if _is_device_disabled(vd.sn):
             _LOGGER.debug(f"Skipping disabled device during resync: sn={vd.sn}")
@@ -1539,7 +1551,9 @@ def _discover_and_register_devices(hass: HomeAssistant):
                  f"{skipped_count} skipped")
 
 
-def _register_single_device(device_id: str, reuse_sn: str = None, is_update: bool = False) -> bool:
+def _register_single_device(device_id: str, reuse_sn: str = None,
+                            is_update: bool = False,
+                            inherit_product=None) -> bool:
     """注册单个设备到 HiLink
     
     从 HA 的 device_registry 和 entity_registry 收集设备信息，
@@ -1653,7 +1667,8 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
         model=model,
         manufacturer=manufacturer,
         reuse_sn=reuse_sn,
-        sn_seed=device_id
+        sn_seed=device_id,
+        force_product=inherit_product
     )
 
     if vd is not None:
@@ -1759,23 +1774,61 @@ def _register_extra_controllables(device_id: str, first_vd) -> int:
             continue
         if not any(k in label or k in eid_l for k in _SPLIT_INCLUDE):
             continue
-        extra.append(eid)
+        extra.append((eid, entry.domain))
 
     if not extra:
         return 0
 
     _LOGGER.info(f"Device {device_id}: {len(extra)} extra controllable entities "
-                 f"will be split into separate virtual devices: {extra}")
+                 f"will be split into separate virtual devices: "
+                 f"{[e for e, _ in extra]}")
 
     count = 0
-    for eid in extra:
+    for eid, domain in extra:
         try:
-            if _register_single_device(f"{device_id}|{eid}"):
+            sub_product = _product_for_sub_entity(first_vd.product, domain)
+            if _register_single_device(f"{device_id}|{eid}", inherit_product=sub_product):
                 count += 1
         except Exception as exc:  # noqa: BLE001
             _LOGGER.error(f"Failed to split-register {device_id}|{eid}: {exc}")
 
     return count
+
+
+def _product_for_sub_entity(base_product, entity_domain: str):
+    """为拆分子实体准备一份产品定义，把 switch 服务的 domain 对齐到该子实体
+
+    问题背景：主设备可能是靠 auto_match 命中「灯泡」品类的（switch 服务
+    domain=light），而拆出来的子实体是 switch/fan，直接复用会 domain 对不上，
+    _find_best_entity 找不到候选，映射数 0，设备又被丢掉。
+    """
+    if base_product is None:
+        return None
+
+    svc = base_product.services.get("switch")
+    if svc is None or svc.ha_mapping is None:
+        return base_product
+    if svc.ha_mapping.domain == entity_domain:
+        return base_product
+    if entity_domain not in ("switch", "light", "fan"):
+        return base_product
+
+    try:
+        prod = copy.deepcopy(base_product)
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.warning(f"deepcopy product failed, fallback to shared: {exc}")
+        return base_product
+
+    sub = prod.services.get("switch")
+    if sub is not None and sub.ha_mapping is not None:
+        sub.ha_mapping.domain = entity_domain
+        sub.ha_mapping.action = "turn_on_off"
+        sub.ha_mapping.value_attr = "state"
+        # switch 实体没有亮度和色温，避免去抢 light 实体
+        if entity_domain == "switch":
+            sub.ha_mapping.brightness_range = None
+            sub.ha_mapping.color_temperature_range = None
+    return prod
 
 
 # ---------------------------------------------------------------------------

@@ -67,7 +67,8 @@ class ServiceRouter:
                         entity_list: list, model: str = "",
                         manufacturer: str = "",
                         reuse_sn: str = None,
-                        sn_seed: str = None) -> Optional[VirtualDevice]:
+                        sn_seed: str = None,
+                        force_product=None) -> Optional[VirtualDevice]:
         """注册一个 HA device 到服务路由中
 
         执行以下步骤：
@@ -108,10 +109,18 @@ class ServiceRouter:
         )
 
         # 2. 产品匹配
-        product, strategy = self.matcher.match_with_detail(device_info)
-        if product is None:
-            _LOGGER.debug(f"Device {device_id} ({model}) did not match any product, skip")
-            return None
+        # force_product：拆分子设备时直接继承主设备已匹配好的产品定义。
+        # 拆出来的子实体只剩一个（如 switch.xxx_auxiliary_light），
+        # entity_domains 里没有 light 了，重新跑 matcher 会落到 auto_match 的
+        # required_domains 之外 → 匹配失败 → 设备凭空消失。
+        if force_product is not None:
+            product = force_product
+            strategy = "inherited"
+        else:
+            product, strategy = self.matcher.match_with_detail(device_info)
+            if product is None:
+                _LOGGER.debug(f"Device {device_id} ({model}) did not match any product, skip")
+                return None
 
         # 3. 创建 VirtualDevice
         if reuse_sn:
