@@ -336,6 +336,62 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         _LOGGER.error("IFACE| probe EXC %s" % _e)
 
     # 启动 C 库
+    def _fd_socket_snapshot():
+        """枚举本进程所有 socket fd：类型 / 域 / 本地地址 / 对端。
+        绕开 /proc（proot 里 /proc/<pid>/fd 不可读），直接 fstat + getsockname，
+        是唯一能看清「SDK 到底建了哪些 socket」的手段。"""
+        import stat as _stat
+        import ctypes as _ct
+        _out = {}
+        try:
+            _lc = _ct.CDLL("libc.so")
+        except Exception:
+            try:
+                _lc = _ct.CDLL(None)
+            except Exception:
+                return {"-": {"err": "no libc"}}
+        for _fd in range(0, 1024):
+            try:
+                _stt = os.fstat(_fd)
+            except OSError:
+                continue
+            if not _stat.S_ISSOCK(_stt.st_mode):
+                continue
+            _info = {"ino": _stt.st_ino}
+            for _name, _opt in (("type", 3), ("domain", 39)):
+                _v = _ct.c_int(0)
+                _vl = _ct.c_int(4)
+                try:
+                    _rc = _lc.getsockopt(_ct.c_int(_fd), _ct.c_int(1),
+                                         _ct.c_int(_opt), _ct.byref(_v),
+                                         _ct.byref(_vl))
+                    _info[_name] = _v.value if _rc == 0 else "rc=%s" % _rc
+                except Exception:
+                    _info[_name] = "EXC"
+            for _name, _fn in (("local", _lc.getsockname),
+                               ("peer", _lc.getpeername)):
+                _buf = _ct.create_string_buffer(128)
+                _ln = _ct.c_int(128)
+                try:
+                    _rc = _fn(_ct.c_int(_fd), _buf, _ct.byref(_ln))
+                    if _rc != 0:
+                        _info[_name] = "-"
+                        continue
+                    _raw = _buf.raw[:_ln.value]
+                    _fam = int.from_bytes(_raw[0:2], "little")
+                    _port = int.from_bytes(_raw[2:4], "big")
+                    if _fam == 2:
+                        _ip = socket.inet_ntoa(_raw[4:8])
+                    elif _fam == 10:
+                        _ip = socket.inet_ntop(socket.AF_INET6, _raw[8:24])
+                    else:
+                        _ip = "fam%s" % _fam
+                    _info[_name] = "%s:%s" % (_ip, _port)
+                except Exception:
+                    _info[_name] = "EXC"
+            _out[_fd] = _info
+        return _out
+
     def _thread_snapshot():
         """返回 [(tid, comm), ...]，用于判断 SDK 是否真的起了后台线程"""
         _out = []
@@ -352,6 +408,8 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             _out.append(("-", "EXC %s" % _e))
         return _out
 
+    _sock_before = _fd_socket_snapshot()
+    _LOGGER.error("PROBE|U0 sockets_before_main=%d" % len(_sock_before))
     _thr_before = _thread_snapshot()
     _LOGGER.error("PROBE|T0 threads_before=%d %s" % (len(_thr_before), _thr_before))
 
@@ -585,23 +643,22 @@ socktest("capability")
         except Exception as _e:
             _LOGGER.error("PROBE|S EXC %s" % _e)
 
-        # 全端口 UDP 绑定扫描：SDK 到底有没有开任何 UDP 监听（不限于 5683）
+        # ===== socket fd 差分：main() 到底新建了哪些 socket / 绑在哪个端口 =====
         try:
-            def _udp_scan():
-                _b = []
-                for _p in range(1024, 10241):
-                    try:
-                        _ts = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-                        _ts.bind(("0.0.0.0", _p))
-                        _ts.close()
-                    except Exception:
-                        _b.append(_p)
-                return _b
-
-            _busy = await hass.async_add_executor_job(_udp_scan)
-            _LOGGER.error("PROBE|Q udp busy(%d): %s" % (len(_busy), _busy[:100]))
+            _sock_after = _fd_socket_snapshot()
+            _new = {f: v for f, v in _sock_after.items() if f not in _sock_before}
+            _gone = [f for f in _sock_before if f not in _sock_after]
+            _LOGGER.error("PROBE|U sockets_after=%d new=%d gone=%d" % (
+                len(_sock_after), len(_new), len(_gone)))
+            for _f, _v in sorted(_new.items()):
+                _LOGGER.error("PROBE|U  NEW fd=%s %s" % (_f, _v))
+            if not _new:
+                _LOGGER.error("PROBE|U  main() 没新建任何 socket，全量 DGRAM 如下：")
+                for _f, _v in sorted(_sock_after.items()):
+                    if _v.get("type") == 2:
+                        _LOGGER.error("PROBE|U  dgram fd=%s %s" % (_f, _v))
         except Exception as _e:
-            _LOGGER.error("PROBE|Q EXC %s" % _e)
+            _LOGGER.error("PROBE|U EXC %s" % _e)
 
         # 垫片与加载器实况
         try:
