@@ -427,6 +427,148 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         except Exception as _e:
             _LOGGER.error("PROBE|L/M/N EXC %s" % _e)
 
+        # ===== 差分诊断：SDK 走 gcompat 的 glibc ABI 垫片，Python 走 musl =====
+        # 两套 libc 各调一次 getifaddrs / if_nametoindex / gethostbyname，
+        # 看 SDK 侧看到的世界是否残缺。放子进程跑（垫片崩了不会带崩 HA）。
+        try:
+            _gc_script = r'''
+import ctypes, socket
+
+
+class Sockaddr(ctypes.Structure):
+    _fields_ = [("sa_family", ctypes.c_ushort), ("sa_data", ctypes.c_char * 14)]
+
+
+class IfAddrs(ctypes.Structure):
+    pass
+
+
+IfAddrs._fields_ = [
+    ("ifa_next", ctypes.POINTER(IfAddrs)),
+    ("ifa_name", ctypes.c_char_p),
+    ("ifa_flags", ctypes.c_uint),
+    ("ifa_addr", ctypes.POINTER(Sockaddr)),
+    ("ifa_netmask", ctypes.POINTER(Sockaddr)),
+    ("ifa_ifu", ctypes.POINTER(Sockaddr)),
+    ("ifa_data", ctypes.c_void_p),
+]
+
+
+class HostEnt(ctypes.Structure):
+    _fields_ = [("h_name", ctypes.c_char_p),
+                ("h_aliases", ctypes.POINTER(ctypes.c_char_p)),
+                ("h_addrtype", ctypes.c_int), ("h_length", ctypes.c_int),
+                ("h_addr_list", ctypes.POINTER(ctypes.POINTER(ctypes.c_char)))]
+
+
+def probe(tag, soname):
+    try:
+        lc = ctypes.CDLL(soname)
+    except Exception as e:
+        print(tag + " CDLL FAIL " + repr(e))
+        return
+    try:
+        lc.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(IfAddrs))]
+        lc.getifaddrs.restype = ctypes.c_int
+        lc.freeifaddrs.argtypes = [ctypes.POINTER(IfAddrs)]
+        p = ctypes.POINTER(IfAddrs)()
+        rc = lc.getifaddrs(ctypes.byref(p))
+        items = []
+        if rc == 0:
+            cur, g = p, 0
+            while cur and g < 64:
+                g += 1
+                it = cur.contents
+                nm = (it.ifa_name or b"").decode("utf-8", "replace")
+                fam = it.ifa_addr.contents.sa_family if it.ifa_addr else 0
+                items.append((nm, fam, hex(it.ifa_flags)))
+                cur = it.ifa_next
+            try:
+                lc.freeifaddrs(p)
+            except Exception:
+                pass
+        print(tag + " getifaddrs rc=" + repr(rc) + " -> " + repr(items))
+    except Exception as e:
+        print(tag + " getifaddrs EXC " + repr(e))
+    try:
+        lc.if_nametoindex.argtypes = [ctypes.c_char_p]
+        lc.if_nametoindex.restype = ctypes.c_uint
+        print(tag + " if_nametoindex(wlan0)=" + repr(lc.if_nametoindex(b"wlan0")))
+    except Exception as e:
+        print(tag + " if_nametoindex EXC " + repr(e))
+    try:
+        lc.gethostbyname.argtypes = [ctypes.c_char_p]
+        lc.gethostbyname.restype = ctypes.POINTER(HostEnt)
+        he = lc.gethostbyname(b"query.hicloud.com")
+        if not he:
+            print(tag + " gethostbyname NULL")
+        else:
+            h = he.contents
+            ip = "-"
+            if h.h_addr_list and h.h_addr_list[0]:
+                ip = socket.inet_ntoa(ctypes.string_at(h.h_addr_list[0], 4))
+            print(tag + " gethostbyname -> " + ip + " fam=" + repr(h.h_addrtype)
+                  + " len=" + repr(h.h_length))
+    except Exception as e:
+        print(tag + " gethostbyname EXC " + repr(e))
+
+
+probe("gcompat", "libc.so.6")
+probe("musl", "libc.so")
+'''
+            with open("/tmp/gc_probe.py", "w") as _f:
+                _f.write(_gc_script)
+            _sp2.run("python3 /tmp/gc_probe.py > /tmp/gc_out.txt 2>&1",
+                     shell=True, timeout=120)
+            try:
+                with open("/tmp/gc_out.txt", "r") as _f:
+                    _lines = _f.read().splitlines()
+                for _ln in _lines[-24:]:
+                    _LOGGER.error("PROBE|P " + _ln)
+            except Exception as _e:
+                _LOGGER.error("PROBE|P read EXC %s" % _e)
+        except Exception as _e:
+            _LOGGER.error("PROBE|P EXC %s" % _e)
+
+        # SDK 线程在内核里挂在哪（poll 说明在等 socket；futex 说明纯空闲）
+        try:
+            _before_ids = {t for t, _ in _thr_before}
+            for _tid, _comm in _thread_snapshot():
+                if _tid in _before_ids:
+                    continue
+                _wc = _run2("cat /proc/self/task/%s/wchan 2>&1; echo; "
+                            "awk '{print \"state=\" $3}' /proc/self/task/%s/stat 2>&1"
+                            % (_tid, _tid))
+                _LOGGER.error("PROBE|S tid=%s comm=%s %s" % (_tid, _comm, _wc))
+        except Exception as _e:
+            _LOGGER.error("PROBE|S EXC %s" % _e)
+
+        # 全端口 UDP 绑定扫描：SDK 到底有没有开任何 UDP 监听（不限于 5683）
+        try:
+            def _udp_scan():
+                _b = []
+                for _p in range(1024, 65536):
+                    try:
+                        _ts = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+                        _ts.bind(("0.0.0.0", _p))
+                        _ts.close()
+                    except Exception:
+                        _b.append(_p)
+                return _b
+
+            _busy = await hass.async_add_executor_job(_udp_scan)
+            _LOGGER.error("PROBE|Q udp busy(%d): %s" % (len(_busy), _busy[:100]))
+        except Exception as _e:
+            _LOGGER.error("PROBE|Q EXC %s" % _e)
+
+        # 垫片与加载器实况
+        try:
+            _LOGGER.error("PROBE|R libs: " + _run2(
+                "ls -l /lib/libc.so.6 /usr/glibc-compat/lib/libc.so.6 2>&1; "
+                "apk info -v gcompat 2>&1 | head -3; ls /lib/ld-* 2>&1"))
+        except Exception as _e:
+            _LOGGER.error("PROBE|R EXC %s" % _e)
+
         # 端口占用测试（不带 SO_REUSEADDR，能绑上说明真没被占）
         # 两轮：+4s / +12s，排除"监听线程起得慢"
         for _round, _delay in ((1, 0), (2, 8)):
