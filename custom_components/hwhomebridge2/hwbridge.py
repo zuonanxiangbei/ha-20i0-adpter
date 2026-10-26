@@ -264,6 +264,66 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
     rlt = lib.main()
     _LOGGER.info(f"start hilink bridge rlt={rlt}.")
 
+    # ===== 网络发现诊断（lib.main 之后，SDK 应已开始监听）=====
+    try:
+        import time as _time
+        import subprocess as _sp2
+        import socket as _sock
+        import struct as _struct
+
+        def _run2(cmd, timeout=30):
+            try:
+                _p = _sp2.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+                return ("rc=%s | out=%s | err=%s" % (
+                    _p.returncode,
+                    (_p.stdout or "").strip()[:700],
+                    (_p.stderr or "").strip()[:200]))
+            except Exception as _e:
+                return "EXC %s" % _e
+
+        _time.sleep(4)  # 等 SDK 线程起监听
+        _LOGGER.error("PROBE|A main() rlt=%r" % (rlt,))
+        _LOGGER.error("PROBE|B udp: " + _run2("cat /proc/net/udp 2>&1 | head -30"))
+        _LOGGER.error("PROBE|C addr: " + _run2("ip -o -4 addr 2>&1 | head -8; cat /proc/net/route 2>&1 | head -5"))
+        _LOGGER.error("PROBE|D igmp: " + _run2("cat /proc/net/igmp 2>&1 | head -15"))
+        _LOGGER.error("PROBE|E rundir: " + _run2("ls -la /config/.storage/hwhomebridge2/config/ 2>&1 | head -20"))
+
+        # 端口占用测试（不带 SO_REUSEADDR，能绑上说明真没被占）
+        for _port in (5683, 5686, 5685):
+            try:
+                _t = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+                _t.bind(("0.0.0.0", _port))
+                _t.close()
+                _LOGGER.error("PROBE|F port %d: FREE (SDK 未监听)" % _port)
+            except Exception as _e:
+                _LOGGER.error("PROBE|F port %d: BUSY (%s)" % (_port, _e))
+
+        # 组播收发自测
+        try:
+            _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM, _sock.IPPROTO_UDP)
+            _s.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+            _s.bind(("", 45678))
+            _mreq = _struct.pack("4s4s", _sock.inet_aton("238.238.238.238"),
+                                 _sock.inet_aton("0.0.0.0"))
+            try:
+                _s.setsockopt(_sock.IPPROTO_IP, _sock.IP_ADD_MEMBERSHIP, _mreq)
+                _join = "JOIN OK"
+            except Exception as _e:
+                _join = "JOIN FAIL %s" % _e
+            _s.settimeout(3)
+            try:
+                _s.sendto(b"probe", ("238.238.238.238", 45678))
+                _r = _s.recvfrom(64)
+                _loop = "LOOPBACK OK %r" % (_r[0][:16],)
+            except Exception as _e:
+                _loop = "LOOPBACK FAIL %s" % _e
+            _s.close()
+            _LOGGER.error("PROBE|G mcast: %s | %s" % (_join, _loop))
+        except Exception as _e:
+            _LOGGER.error("PROBE|G mcast EXC %s" % _e)
+    except Exception as _e:
+        _LOGGER.error("PROBE|net-diag EXC %s" % _e)
+
     # 监听 HA 启动完成事件
     # 注意：如果HA已经启动完成，事件不会触发，需要主动检查
     if hass.state.value == "RUNNING":

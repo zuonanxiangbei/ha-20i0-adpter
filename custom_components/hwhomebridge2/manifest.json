@@ -1,11 +1,14 @@
 {
   "domain": "hwhomebridge2",
   "name": "HuaweiHome Bridge 2",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "config_flow": true,
   "documentation": "https://github.com/zuonanxiangbei/ha-20i0-adpter",
   "issue_tracker": "https://github.com/zuonanxiangbei/ha-20i0-adpter/issues",
-  "requirements": ["psutil", "aiofiles"],
+  "requirements": [
+    "psutil",
+    "aiofiles"
+  ],
   "iot_class": "cloud_polling",
   "ssdp": [],
   "zeroconf": [],
