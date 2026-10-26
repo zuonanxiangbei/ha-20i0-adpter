@@ -94,6 +94,141 @@ _discovery_in_progress = False
 # 初始化
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# proot 兼容补丁：伪造网卡 MAC
+# ---------------------------------------------------------------------------
+# 现象：proot 在 syscall 层拒绝 SIOCGIFHWADDR（EPERM），SDK 取不到网卡 MAC。
+# 后果：hilink_m2m 状态机置错 -> devStatus 卡在 4 -> 5683 永不监听 -> App 搜不到网关。
+# 做法：解析 .so 的 ELF 重定位表，找到 ioctl 的 PLT 槽，把它改指向本进程的
+#       Python 回调；对 SIOCGIFHWADDR 返回一个固定的 MAC，其余原样透传。
+# 实测：打补丁后 devStatus 4 -> 9，5683 单播监听建立。
+FAKE_MAC = bytes.fromhex("021122334455")   # 本地管理位 MAC，避免与真实设备冲突
+_IOCTL_CB = None                            # 必须保活，否则回调被 GC 后崩溃
+
+
+def _elf_plt_offset(so_path: str, symname: str):
+    """从 ELF 里取 symname 的 PLT/GOT 重定位 r_offset（相对基址），找不到返回 None。"""
+    import struct as _st
+
+    with open(so_path, "rb") as f:
+        d = f.read()
+    if d[:4] != b"\x7fELF":
+        return None
+
+    e_shoff = _st.unpack_from("<Q", d, 0x28)[0]
+    e_shentsize = _st.unpack_from("<H", d, 0x3A)[0]
+    e_shnum = _st.unpack_from("<H", d, 0x3C)[0]
+    e_shstrndx = _st.unpack_from("<H", d, 0x3E)[0]
+
+    secs = []
+    for i in range(e_shnum):
+        o = e_shoff + i * e_shentsize
+        (name, typ, flags, addr, off, size, link, info,
+         align, entsize) = _st.unpack_from("<IIQQQQIIQQ", d, o)
+        secs.append({"name": name, "type": typ, "off": off, "size": size,
+                     "link": link, "entsize": entsize})
+
+    shstr_off = secs[e_shstrndx]["off"]
+
+    def _sname(x):
+        b = shstr_off + x
+        return d[b:d.index(b"\0", b)].decode("utf-8", "replace")
+
+    for sct in secs:
+        sct["sname"] = _sname(sct["name"])
+    byname = {sct["sname"]: sct for sct in secs}
+
+    def _sym(nm_off, str_off, idx):
+        o = nm_off + idx * 24
+        st_name = _st.unpack_from("<I", d, o)[0]
+        b = str_off + st_name
+        return d[b:d.index(b"\0", b)].decode("utf-8", "replace")
+
+    for rname in (".rela.plt", ".rela.dyn"):
+        rs = byname.get(rname)
+        if not rs:
+            continue
+        ds = secs[rs["link"]]
+        dy = secs[ds["link"]]
+        for i in range(rs["size"] // 24):
+            o = rs["off"] + i * 24
+            r_offset, r_info, _add = _st.unpack_from("<QQq", d, o)
+            nm = _sym(ds["off"], dy["off"], r_info >> 32)
+            if nm == symname:
+                return r_offset
+    return None
+
+
+def _so_base(so_path: str):
+    """从 /proc/self/maps 找 .so 的加载基址。"""
+    base = None
+    with open("/proc/self/maps", "r") as f:
+        for line in f:
+            ln = line.rstrip("\n")
+            if not ln.endswith(so_path):
+                continue
+            parts = ln.split()
+            try:
+                start = int(parts[0].split("-")[0], 16)
+                off = int(parts[2], 16)
+            except Exception:
+                continue
+            b = start - off
+            if base is None or b < base:
+                base = b
+    return base
+
+
+def _patch_ioctl_mac(so_path: str, mac: bytes = FAKE_MAC) -> bool:
+    """把 .so 的 ioctl PLT 槽换成 Python 回调，对 SIOCGIFHWADDR 返回伪造 MAC。"""
+    global _IOCTL_CB
+    import ctypes as _ct
+
+    off = _elf_plt_offset(so_path, "ioctl")
+    if off is None:
+        _LOGGER.error("MACPATCH| 未在 ELF 中找到 ioctl 重定位，跳过")
+        return False
+    base = _so_base(so_path)
+    if base is None:
+        _LOGGER.error("MACPATCH| 未在 /proc/self/maps 找到基址，跳过")
+        return False
+
+    try:
+        libc = _ct.CDLL(None)          # 本进程自己的 libc（实测可用）
+    except Exception:
+        libc = _ct.CDLL("libc.so.6")
+    real_ioctl = libc.ioctl
+    slot = base + off
+    cb_t = _ct.CFUNCTYPE(_ct.c_int, _ct.c_int, _ct.c_ulong, _ct.c_void_p)
+
+    def _fake(fd, req, arg):
+        try:
+            if req == 0x8927 and arg:      # SIOCGIFHWADDR
+                buf = (_ct.c_char * 40).from_address(arg)
+                buf[16:18] = (1).to_bytes(2, "little")   # sa_family = ARPHRD_ETHER
+                buf[18:24] = mac
+                return 0
+            return real_ioctl(fd, req, arg)
+        except Exception:
+            return -1
+
+    _IOCTL_CB = cb_t(_fake)
+    newval = _ct.cast(_IOCTL_CB, _ct.c_void_p).value
+    page = slot & ~0xFFF
+    rc = libc.mprotect(_ct.c_void_p(page), _ct.c_size_t(0x1000), 3)
+    if rc != 0:
+        _LOGGER.error("MACPATCH| mprotect 失败 rc=%s" % rc)
+        return False
+    old = _ct.c_void_p.from_address(slot).value
+    _ct.c_void_p.from_address(slot).value = newval
+    libc.mprotect(_ct.c_void_p(page), _ct.c_size_t(0x1000), 1)
+    now = _ct.c_void_p.from_address(slot).value
+    _LOGGER.error("MACPATCH| base=%s slot=%s old=%s new=%s mac=%s ok=%s"
+                  % (hex(base), hex(slot), hex(old or 0), hex(now or 0),
+                     ":".join("%02x" % b for b in mac), now == newval))
+    return now == newval
+
+
 async def start_hw_hilink_bridge(hass: HomeAssistant):
     """启动 HiLink 桥接"""
     global ghass, lib, service_router
@@ -211,6 +346,7 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             _LOGGER.error(f"Failed to load so {path}: {e}")
             return None
 
+    loaded_from = so_path
     lib = _load_so(so_path)
 
     if lib is None:
@@ -232,6 +368,7 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
                 os.chmod(dst, 0o755)
                 lib = _load_so(dst)
                 if lib is not None:
+                    loaded_from = dst
                     _LOGGER.error(f"PROBE| so loaded from executable copy: {dst}")
                     break
             except Exception as e:
@@ -242,6 +379,10 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         _LOGGER.error(f"Failed to load so {so_path}: all attempts failed, bridge will not start")
         return
     _LOGGER.info(f"open hilink bridge so success.")
+    try:
+        _patch_ioctl_mac(loaded_from)
+    except Exception as _e:
+        _LOGGER.error("MACPATCH| EXC %s" % _e)
 
     # 设置A_C（48字节随机字符串）
     # 优先从 device_ac 文件读取已保存的 ac，避免每次启动重新生成
