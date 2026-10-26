@@ -187,11 +187,11 @@ def _patch_ioctl_mac(so_path: str, mac: bytes = FAKE_MAC) -> bool:
 
     off = _elf_plt_offset(so_path, "ioctl")
     if off is None:
-        _LOGGER.error("MACPATCH| 未在 ELF 中找到 ioctl 重定位，跳过")
+        _LOGGER.warning("MAC patch: ioctl relocation not found in ELF, skipped")
         return False
     base = _so_base(so_path)
     if base is None:
-        _LOGGER.error("MACPATCH| 未在 /proc/self/maps 找到基址，跳过")
+        _LOGGER.warning("MAC patch: so base not found in /proc/self/maps, skipped")
         return False
 
     try:
@@ -218,13 +218,13 @@ def _patch_ioctl_mac(so_path: str, mac: bytes = FAKE_MAC) -> bool:
     page = slot & ~0xFFF
     rc = libc.mprotect(_ct.c_void_p(page), _ct.c_size_t(0x1000), 3)
     if rc != 0:
-        _LOGGER.error("MACPATCH| mprotect 失败 rc=%s" % rc)
+        _LOGGER.warning("MAC patch: mprotect failed rc=%s" % rc)
         return False
     old = _ct.c_void_p.from_address(slot).value
     _ct.c_void_p.from_address(slot).value = newval
     libc.mprotect(_ct.c_void_p(page), _ct.c_size_t(0x1000), 1)
     now = _ct.c_void_p.from_address(slot).value
-    _LOGGER.error("MACPATCH| base=%s slot=%s old=%s new=%s mac=%s ok=%s"
+    _LOGGER.debug("MAC patch applied: base=%s slot=%s old=%s new=%s mac=%s ok=%s"
                   % (hex(base), hex(slot), hex(old or 0), hex(now or 0),
                      ":".join("%02x" % b for b in mac), now == newval))
     return now == newval
@@ -250,30 +250,20 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             except Exception as _e:
                 return "EXC %s" % _e
 
-        _LOGGER.error("PROBE|0 uname: " + _run("uname -a; id"))
-        _LOGGER.error("PROBE|1 os: " + _run("cat /etc/alpine-release 2>&1; head -3 /etc/os-release 2>&1"))
-        _LOGGER.error("PROBE|2 mounts: " + _run("mount | grep -E ' /config | /tmp ' | head -5"))
-        _LOGGER.error("PROBE|3 loaders: " + _run("ls -l /lib/ld-linux-aarch64.so.1 /lib/ld-musl-* 2>&1"))
-        _LOGGER.error("PROBE|4 libs: " + _run("ls -l /usr/lib/libstdc++.so.6 /usr/lib/libgcc_s.so.1 /lib/libatomic.so.1 2>&1"))
-        _LOGGER.error("PROBE|5 pkg: " + _run("apk info -e gcompat libstdc++ libgcc libatomic 2>&1"))
-
         _marker = hass.config.path(".storage", "hwhomebridge2", ".apk_bootstrap_done")
         _need = (not os.path.exists("/lib/ld-linux-aarch64.so.1")
                  and not os.path.exists("/lib/ld-linux-x86-64.so.2"))
         if _need and not os.path.exists(_marker):
-            _LOGGER.error("PROBE|6 apk add: " + _run(
+            _LOGGER.info("gcompat missing, installing musl compat libs: " + _run(
                 "apk add --no-cache gcompat libstdc++ libgcc libatomic 2>&1", timeout=300))
-            _LOGGER.error("PROBE|7 after: " + _run("ls -l /lib/ld-linux-aarch64.so.1 2>&1"))
             try:
                 os.makedirs(os.path.dirname(_marker), exist_ok=True)
                 with open(_marker, "w") as _f:
                     _f.write("1")
             except Exception:
                 pass
-        else:
-            _LOGGER.error("PROBE|6 apk add skipped (loader present or already attempted)")
     except Exception as _e:
-        _LOGGER.error("PROBE|bootstrap EXC: %s" % _e)
+        _LOGGER.warning("environment bootstrap failed: %s" % _e)
 
     # 初始化 ServiceRouter
     service_router = ServiceRouter()
@@ -329,7 +319,7 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             "libhilink_bridge.so",
         )
         if os.path.exists(alt_path):
-            _LOGGER.error(f"PROBE| so not in fork, fallback to original install: {alt_path}")
+            _LOGGER.info(f"so not bundled, falling back to original install: {alt_path}")
             so_path = alt_path
         else:
             _LOGGER.error(f"SO file not found: {so_path}, bridge will not start")
@@ -355,9 +345,9 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             os.chmod(so_path, 0o755)
             lib = _load_so(so_path)
             if lib is not None:
-                _LOGGER.error("PROBE| so loaded after chmod 755")
+                _LOGGER.info("so loaded after chmod 755")
         except Exception as e:
-            _LOGGER.error(f"PROBE| chmod retry failed: {e}")
+            _LOGGER.debug(f"chmod retry failed: {e}")
 
     if lib is None:
         for base in ("/tmp", "/var/tmp", "/usr/local/lib", "/usr/lib", "/root"):
@@ -370,10 +360,10 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
                 lib = _load_so(dst)
                 if lib is not None:
                     loaded_from = dst
-                    _LOGGER.error(f"PROBE| so loaded from executable copy: {dst}")
+                    _LOGGER.info(f"so loaded from executable copy: {dst}")
                     break
             except Exception as e:
-                _LOGGER.error(f"PROBE| load from {base} failed: {e}")
+                _LOGGER.debug(f"load from {base} failed: {e}")
                 continue
 
     if lib is None:
@@ -383,7 +373,7 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
     try:
         _patch_ioctl_mac(loaded_from)
     except Exception as _e:
-        _LOGGER.error("MACPATCH| EXC %s" % _e)
+        _LOGGER.warning("MAC patch failed, gateway discovery may break under proot: %s" % _e)
 
     # 设置A_C（48字节随机字符串）
     # 优先从 device_ac 文件读取已保存的 ac，避免每次启动重新生成
@@ -432,21 +422,14 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
                     _ifaces.append((_nm, _ip))
             _sk.close()
         except Exception as _e:
-            _LOGGER.error("IFACE| SIOCGIFCONF failed: %s" % _e)
-
-        try:
-            _LOGGER.error("IFACE| if_nameindex: %s" % (socket.if_nameindex(),))
-        except Exception as _e:
-            _LOGGER.error("IFACE| if_nameindex failed: %s" % _e)
-
-        _LOGGER.error("IFACE| SIOCGIFCONF list: %s" % (_ifaces,))
+            _LOGGER.debug("SIOCGIFCONF failed: %s" % _e)
 
         # 选择优先级：wlan0 > wlan* > eth* > ap* > 其他（排除 lo）
         # 注：proot 里 SIOCGIFCONF 常只返回 lo，故以 if_nameindex 为主。
         try:
             _names = [n for _, n in socket.if_nameindex()]
         except Exception as _e:
-            _LOGGER.error("IFACE| if_nameindex retry failed: %s" % _e)
+            _LOGGER.debug("if_nameindex retry failed: %s" % _e)
             _names = [n for n, _ in _ifaces]
 
         _cands = []
@@ -462,459 +445,24 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
                 _cands.append(_n)
 
         _pickname = _cands[0] if _cands else None
-        _LOGGER.error("IFACE| candidates=%s -> pick=%r" % (_cands, _pickname))
+        _LOGGER.info("net interface: candidates=%s -> pick=%r" % (_cands, _pickname))
 
         if _pickname is not None:
             try:
                 lib.HILINK_SetPreferredIface.argtypes = [c_char_p]
                 lib.HILINK_SetPreferredIface.restype = c_int
                 _r = lib.HILINK_SetPreferredIface(_pickname.encode())
-                _LOGGER.error("IFACE| SetPreferredIface(%r) rlt=%r" % (_pickname, _r))
+                _LOGGER.info("HILINK_SetPreferredIface(%r) rlt=%r" % (_pickname, _r))
             except Exception as _e:
-                _LOGGER.error("IFACE| SetPreferredIface EXC %s" % _e)
+                _LOGGER.warning("HILINK_SetPreferredIface failed: %s" % _e)
         else:
-            _LOGGER.error("IFACE| no usable interface detected")
+            _LOGGER.warning("no usable network interface detected")
     except Exception as _e:
-        _LOGGER.error("IFACE| probe EXC %s" % _e)
+        _LOGGER.warning("interface probe failed: %s" % _e)
 
     # 启动 C 库
-    def _fd_socket_snapshot():
-        """枚举本进程所有 socket fd：类型 / 域 / 本地地址 / 对端。
-        绕开 /proc（proot 里 /proc/<pid>/fd 不可读），直接 fstat + getsockname，
-        是唯一能看清「SDK 到底建了哪些 socket」的手段。"""
-        import stat as _stat
-        import ctypes as _ct
-        _out = {}
-        try:
-            _lc = _ct.CDLL("libc.so")
-        except Exception:
-            try:
-                _lc = _ct.CDLL(None)
-            except Exception:
-                return {"-": {"err": "no libc"}}
-        for _fd in range(0, 1024):
-            try:
-                _stt = os.fstat(_fd)
-            except OSError:
-                continue
-            if not _stat.S_ISSOCK(_stt.st_mode):
-                continue
-            _info = {"ino": _stt.st_ino}
-            for _name, _lvl, _opt, _ln_ in (("type", 1, 3, 4),
-                                            ("domain", 1, 39, 4)):
-                _v = _ct.c_int(0)
-                _vl = _ct.c_int(_ln_)
-                try:
-                    _rc = _lc.getsockopt(_ct.c_int(_fd), _ct.c_int(_lvl),
-                                         _ct.c_int(_opt), _ct.byref(_v),
-                                         _ct.byref(_vl))
-                    _info[_name] = _v.value if _rc == 0 else "rc=%s" % _rc
-                except Exception:
-                    _info[_name] = "EXC"
-            # SO_ERROR + TCP_INFO.tcpi_state：判断到路由器的连接到底通没通
-            _eb = _ct.c_int(0)
-            _el = _ct.c_int(4)
-            try:
-                _rc = _lc.getsockopt(_ct.c_int(_fd), _ct.c_int(1), _ct.c_int(4),
-                                     _ct.byref(_eb), _ct.byref(_el))
-                if _rc == 0:
-                    _info["so_err"] = _eb.value
-            except Exception:
-                pass
-            _tb = _ct.create_string_buffer(128)
-            _tl = _ct.c_int(128)
-            try:
-                _rc = _lc.getsockopt(_ct.c_int(_fd), _ct.c_int(6), _ct.c_int(11),
-                                     _tb, _ct.byref(_tl))
-                if _rc == 0 and _tl.value >= 1:
-                    _stt_s = _tb.raw[0]
-                    _names = {1: "ESTAB", 2: "SYN_SENT", 3: "SYN_RECV",
-                              4: "FIN_WAIT1", 5: "FIN_WAIT2", 6: "TIME_WAIT",
-                              7: "CLOSE", 8: "CLOSE_WAIT", 9: "LAST_ACK",
-                              10: "LISTEN", 11: "CLOSING"}
-                    _info["tcp"] = _names.get(_stt_s, str(_stt_s))
-            except Exception:
-                pass
-            for _name, _fn in (("local", _lc.getsockname),
-                               ("peer", _lc.getpeername)):
-                _buf = _ct.create_string_buffer(128)
-                _ln = _ct.c_int(128)
-                try:
-                    _rc = _fn(_ct.c_int(_fd), _buf, _ct.byref(_ln))
-                    if _rc != 0:
-                        _info[_name] = "-"
-                        continue
-                    _raw = _buf.raw[:_ln.value]
-                    _fam = int.from_bytes(_raw[0:2], "little")
-                    _port = int.from_bytes(_raw[2:4], "big")
-                    if _fam == 2:
-                        _ip = socket.inet_ntoa(_raw[4:8])
-                    elif _fam == 10:
-                        _ip = socket.inet_ntop(socket.AF_INET6, _raw[8:24])
-                    else:
-                        _ip = "fam%s" % _fam
-                    _info[_name] = "%s:%s" % (_ip, _port)
-                except Exception:
-                    _info[_name] = "EXC"
-            _out[_fd] = _info
-        return _out
-
-    def _thread_snapshot():
-        """返回 [(tid, comm), ...]，用于判断 SDK 是否真的起了后台线程"""
-        _out = []
-        try:
-            for _tid in os.listdir("/proc/self/task"):
-                _comm = ""
-                try:
-                    with open("/proc/self/task/%s/comm" % _tid, "r") as _fh:
-                        _comm = _fh.read().strip()
-                except Exception:
-                    pass
-                _out.append((_tid, _comm))
-        except Exception as _e:
-            _out.append(("-", "EXC %s" % _e))
-        return _out
-
-    _sock_before = _fd_socket_snapshot()
-    _LOGGER.error("PROBE|U0 sockets_before_main=%d" % len(_sock_before))
-    _thr_before = _thread_snapshot()
-    _LOGGER.error("PROBE|T0 threads_before=%d %s" % (len(_thr_before), _thr_before))
-
     rlt = lib.main()
     _LOGGER.info(f"start hilink bridge rlt={rlt}.")
-    try:
-        _thr_mid = _thread_snapshot()
-        _LOGGER.error("PROBE|T1 threads_after_main=%d %s" % (len(_thr_mid), _thr_mid))
-    except Exception as _e:
-        _LOGGER.error("PROBE|T1 EXC %s" % _e)
-
-    # ===== 网络发现诊断（lib.main 之后，SDK 应已开始监听）=====
-    try:
-        import time as _time
-        import subprocess as _sp2
-        import socket as _sock
-        import struct as _struct
-
-        def _run2(cmd, timeout=30):
-            try:
-                _p = _sp2.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-                return ("rc=%s | out=%s | err=%s" % (
-                    _p.returncode,
-                    (_p.stdout or "").strip()[:1600],
-                    (_p.stderr or "").strip()[:200]))
-            except Exception as _e:
-                return "EXC %s" % _e
-
-        await asyncio.sleep(4)  # 等 SDK 线程起监听
-        _LOGGER.error("PROBE|A main() rlt=%r" % (rlt,))
-        _LOGGER.error("PROBE|B udp: " + _run2("cat /proc/net/udp 2>&1 | head -30"))
-        _LOGGER.error("PROBE|C addr: " + _run2("ip -o -4 addr 2>&1 | head -8; cat /proc/net/route 2>&1 | head -5"))
-        _LOGGER.error("PROBE|D igmp: " + _run2("cat /proc/net/igmp 2>&1 | head -15"))
-        _LOGGER.error("PROBE|E rundir: " + _run2("ls -la /config/.storage/hwhomebridge2/config/ 2>&1"))
-
-        # SDK 状态快照：线程 / fd / 网关 SN / 设备状态
-        try:
-            _thr_now = _thread_snapshot()
-            _LOGGER.error("PROBE|H threads_now=%d %s" % (len(_thr_now), _thr_now))
-        except Exception as _e:
-            _LOGGER.error("PROBE|H threads EXC %s" % _e)
-        try:
-            _LOGGER.error("PROBE|I fds: " + _run2(
-                "ls -l /proc/%d/fd 2>&1 | head -60" % os.getpid()))
-        except Exception as _e:
-            _LOGGER.error("PROBE|I fds EXC %s" % _e)
-        try:
-            _gsn = lib.GetGatewaySN()
-            _LOGGER.error("PROBE|J gatewaySN=%r" % (_gsn,))
-        except Exception as _e:
-            _LOGGER.error("PROBE|J gatewaySN EXC %s" % _e)
-        try:
-            _dstat = lib.HILINK_GetDevStatus()
-            _LOGGER.error("PROBE|K devStatus=%r" % (_dstat,))
-        except Exception as _e:
-            _LOGGER.error("PROBE|K devStatus EXC %s" % _e)
-
-        # ===== 网卡 MAC / IP：SDK 靠 ioctl 拿 MAC，拿不到就整个链路不启动 =====
-        _myip = None
-        try:
-            import fcntl as _fc2
-            _skx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            for _nm in [x for x in (_pickname, "wlan0", "lo") if x]:
-                _req = _nm.encode().ljust(16, b"\0") + b"\0" * 24  # struct ifreq 40B
-                try:
-                    _rb = _fc2.ioctl(_skx.fileno(), 0x8927, _req)  # SIOCGIFHWADDR
-                    _mac = ":".join("%02x" % b for b in _rb[18:24])
-                    _fam = int.from_bytes(_rb[16:18], "little")
-                    _LOGGER.error("PROBE|V SIOCGIFHWADDR(%s) = %s fam=%d" % (_nm, _mac, _fam))
-                except Exception as _e:
-                    _LOGGER.error("PROBE|V SIOCGIFHWADDR(%s) FAIL %s" % (_nm, _e))
-                try:
-                    _rb = _fc2.ioctl(_skx.fileno(), 0x8915, _req)  # SIOCGIFADDR
-                    _ip = socket.inet_ntoa(_rb[20:24])
-                    if _nm == _pickname:
-                        _myip = _ip
-                    _LOGGER.error("PROBE|V SIOCGIFADDR(%s) = %s" % (_nm, _ip))
-                except Exception as _e:
-                    _LOGGER.error("PROBE|V SIOCGIFADDR(%s) FAIL %s" % (_nm, _e))
-            _skx.close()
-        except Exception as _e:
-            _LOGGER.error("PROBE|V EXC %s" % _e)
-
-        # 有些版本的 SDK 期待「IP 字符串」而不是网卡名，再试一次
-        if _myip:
-            try:
-                _ri = lib.HILINK_SetPreferredIface(_myip.encode())
-                _LOGGER.error("IFACE| SetPreferredIface(by IP %r) rlt=%r" % (_myip, _ri))
-            except Exception as _e:
-                _LOGGER.error("IFACE| SetPreferredIface(by IP) EXC %s" % _e)
-
-        # 云侧可达性：SDK 若连不上华为云，可能直接放弃起监听
-        try:
-            _h = "query.hicloud.com"
-            _LOGGER.error("PROBE|L dns: " + _run2(
-                "getent hosts %s 2>&1; cat /etc/resolv.conf 2>&1 | head -5" % _h))
-            try:
-                _c = _sock.create_connection((_h, 443), timeout=6)
-                _c.close()
-                _LOGGER.error("PROBE|M tcp %s:443 OK" % _h)
-            except Exception as _e:
-                _LOGGER.error("PROBE|M tcp %s:443 FAIL %s" % (_h, _e))
-            try:
-                _LOGGER.error("PROBE|N getaddrinfo: %s" % (
-                    _sock.getaddrinfo(_h, 443, _sock.AF_INET)[:3],))
-            except Exception as _e:
-                _LOGGER.error("PROBE|N getaddrinfo FAIL %s" % _e)
-        except Exception as _e:
-            _LOGGER.error("PROBE|L/M/N EXC %s" % _e)
-
-        # ===== 差分诊断：SDK 走 gcompat 的 glibc ABI 垫片，Python 走 musl =====
-        # 两套 libc 各调一次 getifaddrs / if_nametoindex / gethostbyname，
-        # 看 SDK 侧看到的世界是否残缺。放子进程跑（垫片崩了不会带崩 HA）。
-        try:
-            _gc_script = r'''
-import ctypes, socket
-
-
-class Sockaddr(ctypes.Structure):
-    _fields_ = [("sa_family", ctypes.c_ushort), ("sa_data", ctypes.c_char * 14)]
-
-
-class IfAddrs(ctypes.Structure):
-    pass
-
-
-IfAddrs._fields_ = [
-    ("ifa_next", ctypes.POINTER(IfAddrs)),
-    ("ifa_name", ctypes.c_char_p),
-    ("ifa_flags", ctypes.c_uint),
-    ("ifa_addr", ctypes.POINTER(Sockaddr)),
-    ("ifa_netmask", ctypes.POINTER(Sockaddr)),
-    ("ifa_ifu", ctypes.POINTER(Sockaddr)),
-    ("ifa_data", ctypes.c_void_p),
-]
-
-
-class HostEnt(ctypes.Structure):
-    _fields_ = [("h_name", ctypes.c_char_p),
-                ("h_aliases", ctypes.POINTER(ctypes.c_char_p)),
-                ("h_addrtype", ctypes.c_int), ("h_length", ctypes.c_int),
-                ("h_addr_list", ctypes.POINTER(ctypes.POINTER(ctypes.c_char)))]
-
-
-def probe(tag, soname):
-    try:
-        lc = ctypes.CDLL(soname)
-    except Exception as e:
-        print(tag + " CDLL FAIL " + repr(e))
-        return
-    try:
-        lc.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(IfAddrs))]
-        lc.getifaddrs.restype = ctypes.c_int
-        lc.freeifaddrs.argtypes = [ctypes.POINTER(IfAddrs)]
-        p = ctypes.POINTER(IfAddrs)()
-        rc = lc.getifaddrs(ctypes.byref(p))
-        items = []
-        if rc == 0:
-            cur, g = p, 0
-            while cur and g < 64:
-                g += 1
-                it = cur.contents
-                nm = (it.ifa_name or b"").decode("utf-8", "replace")
-                fam = it.ifa_addr.contents.sa_family if it.ifa_addr else 0
-                items.append((nm, fam, hex(it.ifa_flags)))
-                cur = it.ifa_next
-            try:
-                lc.freeifaddrs(p)
-            except Exception:
-                pass
-        print(tag + " getifaddrs rc=" + repr(rc) + " -> " + repr(items))
-    except Exception as e:
-        print(tag + " getifaddrs EXC " + repr(e))
-    try:
-        lc.if_nametoindex.argtypes = [ctypes.c_char_p]
-        lc.if_nametoindex.restype = ctypes.c_uint
-        print(tag + " if_nametoindex(wlan0)=" + repr(lc.if_nametoindex(b"wlan0")))
-    except Exception as e:
-        print(tag + " if_nametoindex EXC " + repr(e))
-    try:
-        lc.gethostbyname.argtypes = [ctypes.c_char_p]
-        lc.gethostbyname.restype = ctypes.POINTER(HostEnt)
-        he = lc.gethostbyname(b"query.hicloud.com")
-        if not he:
-            print(tag + " gethostbyname NULL")
-        else:
-            h = he.contents
-            ip = "-"
-            if h.h_addr_list and h.h_addr_list[0]:
-                ip = socket.inet_ntoa(ctypes.string_at(h.h_addr_list[0], 4))
-            print(tag + " gethostbyname -> " + ip + " fam=" + repr(h.h_addrtype)
-                  + " len=" + repr(h.h_length))
-    except Exception as e:
-        print(tag + " gethostbyname EXC " + repr(e))
-
-
-def socktest(tag):
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        r = []
-        try:
-            s.setsockopt(socket.SOL_SOCKET,
-                         getattr(socket, "SO_BINDTODEVICE", 25), b"wlan0")
-            r.append("SO_BINDTODEVICE(bind-to-wlan0) OK")
-        except Exception as e:
-            r.append("SO_BINDTODEVICE FAIL " + repr(e))
-        try:
-            s.bind(("0.0.0.0", 5683))
-            r.append("bind 0.0.0.0:5683 OK")
-        except Exception as e:
-            r.append("bind 0.0.0.0:5683 FAIL " + repr(e))
-        try:
-            s.close()
-        except Exception:
-            pass
-        try:
-            s3 = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
-            r.append("raw socket OK")
-            s3.close()
-        except Exception as e:
-            r.append("raw socket FAIL " + repr(e))
-        try:
-            s4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s4.bind(("0.0.0.0", 5353))
-            r.append("bind 5353(REUSEADDR) OK")
-            s4.close()
-        except Exception as e:
-            r.append("bind 5353 FAIL " + repr(e))
-        print(tag + " " + " | ".join(r))
-    except Exception as e:
-        print(tag + " socktest EXC " + repr(e))
-
-
-probe("gcompat", "libc.so.6")
-probe("musl", "libc.so")
-socktest("capability")
-'''
-            with open("/tmp/gc_probe.py", "w") as _f:
-                _f.write(_gc_script)
-            await hass.async_add_executor_job(
-                lambda: _sp2.run("python3 /tmp/gc_probe.py > /tmp/gc_out.txt 2>&1",
-                                 shell=True, timeout=120).returncode)
-            try:
-                with open("/tmp/gc_out.txt", "r") as _f:
-                    _lines = _f.read().splitlines()
-                for _ln in _lines[-24:]:
-                    _LOGGER.error("PROBE|P " + _ln)
-            except Exception as _e:
-                _LOGGER.error("PROBE|P read EXC %s" % _e)
-        except Exception as _e:
-            _LOGGER.error("PROBE|P EXC %s" % _e)
-
-        # SDK 线程在内核里挂在哪（poll 说明在等 socket；futex 说明纯空闲）
-        try:
-            _before_ids = {t for t, _ in _thr_before}
-            for _tid, _comm in _thread_snapshot():
-                if _tid in _before_ids:
-                    continue
-                _pid_ = os.getpid()
-                _wc = _run2("cat /proc/%d/task/%s/wchan 2>&1; echo; "
-                            "awk '{print \"state=\" $3}' /proc/%d/task/%s/stat 2>&1"
-                            % (_pid_, _tid, _pid_, _tid))
-                _LOGGER.error("PROBE|S tid=%s comm=%s %s" % (_tid, _comm, _wc))
-        except Exception as _e:
-            _LOGGER.error("PROBE|S EXC %s" % _e)
-
-        # ===== socket fd 差分：main() 到底新建了哪些 socket / 绑在哪个端口 =====
-        try:
-            _sock_after = _fd_socket_snapshot()
-            _new = {f: v for f, v in _sock_after.items() if f not in _sock_before}
-            _gone = [f for f in _sock_before if f not in _sock_after]
-            _LOGGER.error("PROBE|U sockets_after=%d new=%d gone=%d" % (
-                len(_sock_after), len(_new), len(_gone)))
-            for _f, _v in sorted(_new.items()):
-                _LOGGER.error("PROBE|U  NEW fd=%s %s" % (_f, _v))
-            if not _new:
-                _LOGGER.error("PROBE|U  main() 没新建任何 socket，全量 DGRAM 如下：")
-                for _f, _v in sorted(_sock_after.items()):
-                    if _v.get("type") == 2:
-                        _LOGGER.error("PROBE|U  dgram fd=%s %s" % (_f, _v))
-        except Exception as _e:
-            _LOGGER.error("PROBE|U EXC %s" % _e)
-
-        # 垫片与加载器实况
-        try:
-            _LOGGER.error("PROBE|R libs: " + _run2(
-                "ls -l /lib/libc.so.6 /usr/glibc-compat/lib/libc.so.6 2>&1; "
-                "apk info -v gcompat 2>&1 | head -3; ls /lib/ld-* 2>&1"))
-        except Exception as _e:
-            _LOGGER.error("PROBE|R EXC %s" % _e)
-
-        # 端口占用测试（不带 SO_REUSEADDR，能绑上说明真没被占）
-        # 两轮：+4s / +12s，排除"监听线程起得慢"
-        for _round, _delay in ((1, 0), (2, 8)):
-            if _delay:
-                await asyncio.sleep(_delay)
-                _LOGGER.error("PROBE|T2 threads=%s" % (_thread_snapshot(),))
-                try:
-                    _r2 = (lib.HILINK_SetPreferredIface(_pickname.encode())
-                           if _pickname else None)
-                    _LOGGER.error("IFACE| re-SetPreferredIface(%r) rlt=%r" % (_pickname, _r2))
-                except Exception as _e:
-                    _LOGGER.error("IFACE| re-SetPreferredIface EXC %s" % _e)
-            for _port in (5683, 5686, 5685):
-                try:
-                    _t = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-                    _t.bind(("0.0.0.0", _port))
-                    _t.close()
-                    _LOGGER.error("PROBE|F r%d port %d: FREE (SDK 未监听)" % (_round, _port))
-                except Exception as _e:
-                    _LOGGER.error("PROBE|F r%d port %d: BUSY (%s)" % (_round, _port, _e))
-
-        # 组播收发自测
-        try:
-            _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM, _sock.IPPROTO_UDP)
-            _s.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
-            _s.bind(("", 45678))
-            _mreq = _struct.pack("4s4s", _sock.inet_aton("238.238.238.238"),
-                                 _sock.inet_aton("0.0.0.0"))
-            try:
-                _s.setsockopt(_sock.IPPROTO_IP, _sock.IP_ADD_MEMBERSHIP, _mreq)
-                _join = "JOIN OK"
-            except Exception as _e:
-                _join = "JOIN FAIL %s" % _e
-            _s.settimeout(3)
-            try:
-                _s.sendto(b"probe", ("238.238.238.238", 45678))
-                _r = _s.recvfrom(64)
-                _loop = "LOOPBACK OK %r" % (_r[0][:16],)
-            except Exception as _e:
-                _loop = "LOOPBACK FAIL %s" % _e
-            _s.close()
-            _LOGGER.error("PROBE|G mcast: %s | %s" % (_join, _loop))
-        except Exception as _e:
-            _LOGGER.error("PROBE|G mcast EXC %s" % _e)
-    except Exception as _e:
-        _LOGGER.error("PROBE|net-diag EXC %s" % _e)
 
     # 监听 HA 启动完成事件
     # 注意：如果HA已经启动完成，事件不会触发，需要主动检查
