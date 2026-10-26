@@ -21,3 +21,31 @@ sniff:
       default: [5683, 5686, 5687]
       selector:
         object:
+
+sh:
+  name: 执行命令
+  description: 在容器内执行一条 shell 命令，stdout/stderr 写入 ERROR 日志（诊断用，用完请停用）。
+  fields:
+    cmd:
+      name: 命令
+      description: 要执行的 shell 命令
+      required: true
+      selector:
+        text:
+    timeout:
+      name: 超时
+      description: 最长执行时间（秒）
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 300
+          unit_of_measurement: s
+    limit:
+      name: 输出截断
+      description: 只保留末尾多少字符
+      default: 6000
+      selector:
+        number:
+          min: 200
+          max: 40000

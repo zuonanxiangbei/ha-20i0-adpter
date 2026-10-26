@@ -80,9 +80,36 @@ async def _async_register_diag_service(hass: HomeAssistant) -> None:
         ports = call.data.get("ports") or [5683, 5686, 5687]
         await _async_sniff_start(hass, seconds, [int(p) for p in ports])
 
+    async def _handle_sh(call):
+        """在容器里执行一条 shell 命令，输出写进 ERROR 日志（诊断用）。
+
+        好处：改探针不用再改代码 + 重启 HA，直接调服务就能看结果。
+        """
+        import subprocess as sp_mod
+
+        cmd = call.data.get("cmd") or ""
+        if not cmd:
+            _LOGGER.error("SH| 空命令")
+            return
+        timeout = int(call.data.get("timeout", 30))
+        limit = int(call.data.get("limit", 6000))
+
+        def _run():
+            try:
+                pr = sp_mod.run(cmd, shell=True, capture_output=True,
+                                text=True, timeout=timeout)
+                return (pr.returncode, pr.stdout or "", pr.stderr or "")
+            except Exception as exc:  # noqa: BLE001
+                return ("EXC", "", str(exc))
+
+        rc, out, err = await hass.async_add_executor_job(_run)
+        _LOGGER.error("SH| cmd=%s\nSH| rc=%s\nSH| out=\n%s\nSH| err=\n%s"
+                      % (cmd, rc, out[-limit:], err[-limit:]))
+
     hass.services.async_register(DOMAIN, DIAG_SERVICE, _handle)
     hass.services.async_register(DOMAIN, "sniff", _handle_sniff)
-    _LOGGER.info("netdiag/sniff service registered")
+    hass.services.async_register(DOMAIN, "sh", _handle_sh)
+    _LOGGER.info("netdiag/sniff/sh service registered")
 
 
 
