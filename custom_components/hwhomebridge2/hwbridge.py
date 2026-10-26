@@ -264,6 +264,7 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
     # proot 环境里 netlink / getifaddrs 不可用（ip 命令报 Socket not connected，
     # /proc/net/* 全是 Permission denied），SDK 可能因此拿不到本机网卡而不开监听。
     # 这里用不打 netlink 的 SIOCGIFCONF ioctl 枚举网卡，并显式告诉 SDK 用哪块。
+    _pickname = None
     try:
         import struct as _st
         import fcntl as _fc
@@ -335,8 +336,32 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         _LOGGER.error("IFACE| probe EXC %s" % _e)
 
     # 启动 C 库
+    def _thread_snapshot():
+        """返回 [(tid, comm), ...]，用于判断 SDK 是否真的起了后台线程"""
+        _out = []
+        try:
+            for _tid in os.listdir("/proc/self/task"):
+                _comm = ""
+                try:
+                    with open("/proc/self/task/%s/comm" % _tid, "r") as _fh:
+                        _comm = _fh.read().strip()
+                except Exception:
+                    pass
+                _out.append((_tid, _comm))
+        except Exception as _e:
+            _out.append(("-", "EXC %s" % _e))
+        return _out
+
+    _thr_before = _thread_snapshot()
+    _LOGGER.error("PROBE|T0 threads_before=%d %s" % (len(_thr_before), _thr_before))
+
     rlt = lib.main()
     _LOGGER.info(f"start hilink bridge rlt={rlt}.")
+    try:
+        _thr_mid = _thread_snapshot()
+        _LOGGER.error("PROBE|T1 threads_after_main=%d %s" % (len(_thr_mid), _thr_mid))
+    except Exception as _e:
+        _LOGGER.error("PROBE|T1 EXC %s" % _e)
 
     # ===== 网络发现诊断（lib.main 之后，SDK 应已开始监听）=====
     try:
@@ -362,15 +387,47 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         _LOGGER.error("PROBE|D igmp: " + _run2("cat /proc/net/igmp 2>&1 | head -15"))
         _LOGGER.error("PROBE|E rundir: " + _run2("ls -la /config/.storage/hwhomebridge2/config/ 2>&1 | head -20"))
 
+        # SDK 状态快照：线程 / fd / 网关 SN / 设备状态
+        try:
+            _thr_now = _thread_snapshot()
+            _LOGGER.error("PROBE|H threads_now=%d %s" % (len(_thr_now), _thr_now))
+        except Exception as _e:
+            _LOGGER.error("PROBE|H threads EXC %s" % _e)
+        try:
+            _LOGGER.error("PROBE|I fds: " + _run2("ls -l /proc/self/fd 2>&1 | head -40"))
+        except Exception as _e:
+            _LOGGER.error("PROBE|I fds EXC %s" % _e)
+        try:
+            _gsn = lib.GetGatewaySN()
+            _LOGGER.error("PROBE|J gatewaySN=%r" % (_gsn,))
+        except Exception as _e:
+            _LOGGER.error("PROBE|J gatewaySN EXC %s" % _e)
+        try:
+            _dstat = lib.HILINK_GetDevStatus()
+            _LOGGER.error("PROBE|K devStatus=%r" % (_dstat,))
+        except Exception as _e:
+            _LOGGER.error("PROBE|K devStatus EXC %s" % _e)
+
         # 端口占用测试（不带 SO_REUSEADDR，能绑上说明真没被占）
-        for _port in (5683, 5686, 5685):
-            try:
-                _t = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-                _t.bind(("0.0.0.0", _port))
-                _t.close()
-                _LOGGER.error("PROBE|F port %d: FREE (SDK 未监听)" % _port)
-            except Exception as _e:
-                _LOGGER.error("PROBE|F port %d: BUSY (%s)" % (_port, _e))
+        # 两轮：+4s / +12s，排除"监听线程起得慢"
+        for _round, _delay in ((1, 0), (2, 8)):
+            if _delay:
+                await asyncio.sleep(_delay)
+                _LOGGER.error("PROBE|T2 threads=%s" % (_thread_snapshot(),))
+                try:
+                    _r2 = (lib.HILINK_SetPreferredIface(_pickname.encode())
+                           if _pickname else None)
+                    _LOGGER.error("IFACE| re-SetPreferredIface(%r) rlt=%r" % (_pickname, _r2))
+                except Exception as _e:
+                    _LOGGER.error("IFACE| re-SetPreferredIface EXC %s" % _e)
+            for _port in (5683, 5686, 5685):
+                try:
+                    _t = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+                    _t.bind(("0.0.0.0", _port))
+                    _t.close()
+                    _LOGGER.error("PROBE|F r%d port %d: FREE (SDK 未监听)" % (_round, _port))
+                except Exception as _e:
+                    _LOGGER.error("PROBE|F r%d port %d: BUSY (%s)" % (_round, _port, _e))
 
         # 组播收发自测
         try:
