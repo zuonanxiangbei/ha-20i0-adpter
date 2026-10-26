@@ -408,6 +408,25 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         except Exception as _e:
             _LOGGER.error("PROBE|K devStatus EXC %s" % _e)
 
+        # 云侧可达性：SDK 若连不上华为云，可能直接放弃起监听
+        try:
+            _h = "query.hicloud.com"
+            _LOGGER.error("PROBE|L dns: " + _run2(
+                "getent hosts %s 2>&1; cat /etc/resolv.conf 2>&1 | head -5" % _h))
+            try:
+                _c = _sock.create_connection((_h, 443), timeout=6)
+                _c.close()
+                _LOGGER.error("PROBE|M tcp %s:443 OK" % _h)
+            except Exception as _e:
+                _LOGGER.error("PROBE|M tcp %s:443 FAIL %s" % (_h, _e))
+            try:
+                _LOGGER.error("PROBE|N getaddrinfo: %s" % (
+                    _sock.getaddrinfo(_h, 443, _sock.AF_INET)[:3],))
+            except Exception as _e:
+                _LOGGER.error("PROBE|N getaddrinfo FAIL %s" % _e)
+        except Exception as _e:
+            _LOGGER.error("PROBE|L/M/N EXC %s" % _e)
+
         # 端口占用测试（不带 SO_REUSEADDR，能绑上说明真没被占）
         # 两轮：+4s / +12s，排除"监听线程起得慢"
         for _round, _delay in ((1, 0), (2, 8)):
