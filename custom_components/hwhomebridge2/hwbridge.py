@@ -100,6 +100,45 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
 
     ghass = hass
 
+    # ===== 环境自举（musl/Alpine 需要 gcompat 才能加载 glibc 编译的 .so）=====
+    try:
+        import subprocess as _sp
+
+        def _run(cmd, timeout=60):
+            try:
+                _p = _sp.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+                return ("rc=%s | out=%s | err=%s" % (
+                    _p.returncode,
+                    (_p.stdout or "").strip()[:500],
+                    (_p.stderr or "").strip()[:300]))
+            except Exception as _e:
+                return "EXC %s" % _e
+
+        _LOGGER.error("PROBE|0 uname: " + _run("uname -a; id"))
+        _LOGGER.error("PROBE|1 os: " + _run("cat /etc/alpine-release 2>&1; head -3 /etc/os-release 2>&1"))
+        _LOGGER.error("PROBE|2 mounts: " + _run("mount | grep -E ' /config | /tmp ' | head -5"))
+        _LOGGER.error("PROBE|3 loaders: " + _run("ls -l /lib/ld-linux-aarch64.so.1 /lib/ld-musl-* 2>&1"))
+        _LOGGER.error("PROBE|4 libs: " + _run("ls -l /usr/lib/libstdc++.so.6 /usr/lib/libgcc_s.so.1 /lib/libatomic.so.1 2>&1"))
+        _LOGGER.error("PROBE|5 pkg: " + _run("apk info -e gcompat libstdc++ libgcc libatomic 2>&1"))
+
+        _marker = hass.config.path(".storage", "hwhomebridge2", ".apk_bootstrap_done")
+        _need = (not os.path.exists("/lib/ld-linux-aarch64.so.1")
+                 and not os.path.exists("/lib/ld-linux-x86-64.so.2"))
+        if _need and not os.path.exists(_marker):
+            _LOGGER.error("PROBE|6 apk add: " + _run(
+                "apk add --no-cache gcompat libstdc++ libgcc libatomic 2>&1", timeout=300))
+            _LOGGER.error("PROBE|7 after: " + _run("ls -l /lib/ld-linux-aarch64.so.1 2>&1"))
+            try:
+                os.makedirs(os.path.dirname(_marker), exist_ok=True)
+                with open(_marker, "w") as _f:
+                    _f.write("1")
+            except Exception:
+                pass
+        else:
+            _LOGGER.error("PROBE|6 apk add skipped (loader present or already attempted)")
+    except Exception as _e:
+        _LOGGER.error("PROBE|bootstrap EXC: %s" % _e)
+
     # 初始化 ServiceRouter
     service_router = ServiceRouter()
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
