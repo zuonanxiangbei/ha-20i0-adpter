@@ -375,7 +375,7 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
                 _p = _sp2.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
                 return ("rc=%s | out=%s | err=%s" % (
                     _p.returncode,
-                    (_p.stdout or "").strip()[:700],
+                    (_p.stdout or "").strip()[:1600],
                     (_p.stderr or "").strip()[:200]))
             except Exception as _e:
                 return "EXC %s" % _e
@@ -394,7 +394,8 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         except Exception as _e:
             _LOGGER.error("PROBE|H threads EXC %s" % _e)
         try:
-            _LOGGER.error("PROBE|I fds: " + _run2("ls -l /proc/self/fd 2>&1 | head -40"))
+            _LOGGER.error("PROBE|I fds: " + _run2(
+                "ls -l /proc/%d/fd 2>&1 | head -60" % os.getpid()))
         except Exception as _e:
             _LOGGER.error("PROBE|I fds EXC %s" % _e)
         try:
@@ -513,13 +514,53 @@ def probe(tag, soname):
         print(tag + " gethostbyname EXC " + repr(e))
 
 
+def socktest(tag):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        r = []
+        try:
+            s.setsockopt(socket.SOL_SOCKET,
+                         getattr(socket, "SO_BINDTODEVICE", 25), b"wlan0")
+            r.append("SO_BINDTODEVICE(bind-to-wlan0) OK")
+        except Exception as e:
+            r.append("SO_BINDTODEVICE FAIL " + repr(e))
+        try:
+            s.bind(("0.0.0.0", 5683))
+            r.append("bind 0.0.0.0:5683 OK")
+        except Exception as e:
+            r.append("bind 0.0.0.0:5683 FAIL " + repr(e))
+        try:
+            s.close()
+        except Exception:
+            pass
+        try:
+            s3 = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
+            r.append("raw socket OK")
+            s3.close()
+        except Exception as e:
+            r.append("raw socket FAIL " + repr(e))
+        try:
+            s4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s4.bind(("0.0.0.0", 5353))
+            r.append("bind 5353(REUSEADDR) OK")
+            s4.close()
+        except Exception as e:
+            r.append("bind 5353 FAIL " + repr(e))
+        print(tag + " " + " | ".join(r))
+    except Exception as e:
+        print(tag + " socktest EXC " + repr(e))
+
+
 probe("gcompat", "libc.so.6")
 probe("musl", "libc.so")
+socktest("capability")
 '''
             with open("/tmp/gc_probe.py", "w") as _f:
                 _f.write(_gc_script)
-            _sp2.run("python3 /tmp/gc_probe.py > /tmp/gc_out.txt 2>&1",
-                     shell=True, timeout=120)
+            await hass.async_add_executor_job(
+                lambda: _sp2.run("python3 /tmp/gc_probe.py > /tmp/gc_out.txt 2>&1",
+                                 shell=True, timeout=120).returncode)
             try:
                 with open("/tmp/gc_out.txt", "r") as _f:
                     _lines = _f.read().splitlines()
@@ -536,9 +577,10 @@ probe("musl", "libc.so")
             for _tid, _comm in _thread_snapshot():
                 if _tid in _before_ids:
                     continue
-                _wc = _run2("cat /proc/self/task/%s/wchan 2>&1; echo; "
-                            "awk '{print \"state=\" $3}' /proc/self/task/%s/stat 2>&1"
-                            % (_tid, _tid))
+                _pid_ = os.getpid()
+                _wc = _run2("cat /proc/%d/task/%s/wchan 2>&1; echo; "
+                            "awk '{print \"state=\" $3}' /proc/%d/task/%s/stat 2>&1"
+                            % (_pid_, _tid, _pid_, _tid))
                 _LOGGER.error("PROBE|S tid=%s comm=%s %s" % (_tid, _comm, _wc))
         except Exception as _e:
             _LOGGER.error("PROBE|S EXC %s" % _e)
@@ -547,7 +589,7 @@ probe("musl", "libc.so")
         try:
             def _udp_scan():
                 _b = []
-                for _p in range(1024, 65536):
+                for _p in range(1024, 10241):
                     try:
                         _ts = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
                         _ts.bind(("0.0.0.0", _p))
