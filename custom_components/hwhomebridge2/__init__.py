@@ -11,6 +11,74 @@ from .hwbridge import start_hw_hilink_bridge, nullify_hilink_callbacks
 
 _LOGGER = logging.getLogger(__name__)
 
+DIAG_SERVICE = "netdiag"
+
+
+async def _async_netdiag_log() -> None:
+    """把网络发现相关的运行时状态打到 ERROR 级日志，便于远程读取 /api/error_log。"""
+    import subprocess as sp
+    import socket as sock_mod
+    import struct as struct_mod
+
+    def run(cmd, timeout=25):
+        try:
+            p = sp.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+            return "rc=%s | out=%s | err=%s" % (
+                p.returncode,
+                (p.stdout or "").strip()[:900],
+                (p.stderr or "").strip()[:200],
+            )
+        except Exception as e:  # noqa: BLE001
+            return "EXC %s" % e
+
+    _LOGGER.error("DIAG|ifaces: " + run("ls /sys/class/net/"))
+    _LOGGER.error("DIAG|mcast_rx: " + run(
+        "for i in /sys/class/net/*/statistics/multicast; do printf '%s=' \"$i\"; cat \"$i\"; done"))
+    _LOGGER.error("DIAG|rx_pkts: " + run(
+        "for i in /sys/class/net/*/statistics/rx_packets; do printf '%s=' \"$i\"; cat \"$i\"; done"))
+    _LOGGER.error("DIAG|igmp: " + run("cat /proc/net/igmp 2>&1 | head -20"))
+    _LOGGER.error("DIAG|udp: " + run("cat /proc/net/udp 2>&1 | head -30"))
+    _LOGGER.error("DIAG|addr: " + run("ip -o -4 addr 2>&1 | head -10"))
+
+    def loop_test():
+        try:
+            s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_DGRAM, sock_mod.IPPROTO_UDP)
+            s.setsockopt(sock_mod.SOL_SOCKET, sock_mod.SO_REUSEADDR, 1)
+            s.bind(("", 45679))
+            mreq = struct_mod.pack("4s4s", sock_mod.inet_aton("238.238.238.238"),
+                                   sock_mod.inet_aton("0.0.0.0"))
+            try:
+                s.setsockopt(sock_mod.IPPROTO_IP, sock_mod.IP_ADD_MEMBERSHIP, mreq)
+                join = "JOIN OK"
+            except Exception as e:  # noqa: BLE001
+                join = "JOIN FAIL %s" % e
+            s.settimeout(2)
+            try:
+                s.sendto(b"diag", ("238.238.238.238", 45679))
+                got = s.recvfrom(64)
+                loop = "LOOPBACK OK %r" % (got[0][:16],)
+            except Exception as e:  # noqa: BLE001
+                loop = "LOOPBACK FAIL %s" % e
+            s.close()
+            return "%s | %s" % (join, loop)
+        except Exception as e:  # noqa: BLE001
+            return "EXC %s" % e
+
+    _LOGGER.error("DIAG|loop: " + loop_test())
+
+
+async def _async_register_diag_service(hass: HomeAssistant) -> None:
+    """注册 netdiag 诊断服务（可重复调用，已注册则跳过）。"""
+    if hass.services.has_service(DOMAIN, DIAG_SERVICE):
+        return
+
+    async def _handle(call):  # noqa: ARG001
+        await _async_netdiag_log()
+
+    hass.services.async_register(DOMAIN, DIAG_SERVICE, _handle)
+    _LOGGER.info("netdiag service registered")
+
+
 
 async def async_setup(hass: HomeAssistant, config: dict):
     """Set up the hwhomebridge component.
@@ -20,6 +88,7 @@ async def async_setup(hass: HomeAssistant, config: dict):
     """
     _LOGGER.info("async_setup called, starting hwhomebridge integration")
     hass.data.setdefault(DOMAIN, {})
+    await _async_register_diag_service(hass)
     await start_hw_hilink_bridge(hass)
     return True
 
