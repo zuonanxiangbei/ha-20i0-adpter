@@ -39,10 +39,9 @@
 域名为 `hwhomebridge2`，与原版 `hwhomebridge` 互不冲突，可并存。
 
 1. **`.so` 加载三级回退**：直接加载失败（`Permission denied`，`/config` 位于 noexec 挂载时出现）→ 先 `chmod 755` 重试 → 仍失败则拷贝到 `/tmp`、`/usr/local/lib` 等可执行路径后再加载。
-2. **不含 aarch64 `.so` 二进制**：运行时自动回退到原版 `hwhomebridge` 安装目录
-   （`/config/custom_components/hwhomebridge/hilink_bridge/lib/<arch>/`）读取。
-   **因此请勿卸载原版 hwhomebridge 集成**（禁用/删除其配置条目即可，文件需保留）。
-   amd64 `.so` 已包含在本仓库内（迁移到 x86 主机时使用）。
+2. **aarch64 / amd64 两个架构的 `.so` 均内置于本仓库**（aarch64 = 9,866,752 字节，
+   amd64 = 2,383,384 字节），无需依赖原版 `hwhomebridge` 安装目录。
+   若本目录缺文件，运行时仍会回退到 `/config/custom_components/hwhomebridge/hilink_bridge/lib/<arch>/` 读取。
 3. `.storage` 运行时目录改为 `hwhomebridge2/config`，与原版隔离。
 
 ### 已知限制
