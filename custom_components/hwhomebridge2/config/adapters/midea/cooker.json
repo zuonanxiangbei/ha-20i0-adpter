@@ -2,7 +2,7 @@
     "pid": "007",
     "match_rules": [
         {"type": "model_keyword", "keywords": ["MB-FB"]},
-        {"type": "name_keyword", "keywords": ["midea", "美的"]}
+        {"type": "name_keyword", "keywords": ["电饭煲", "电饭锅", "饭煲", "rice cooker"]}
     ],
     "services": {
         "switch": {

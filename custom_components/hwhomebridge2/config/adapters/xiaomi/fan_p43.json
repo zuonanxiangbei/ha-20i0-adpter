@@ -1,0 +1,22 @@
+{
+    "pid": "002",
+    "match_rules": [
+        {"type": "model_keyword", "keywords": ["xiaomi.fan.p"]}
+    ],
+    "services": {
+        "switch": {
+            "domain": "fan",
+            "action": "turn_on_off",
+            "value_attr": "state",
+            "name_keywords": ["风扇", "fan"]
+        },
+        "brightness": {
+            "domain": "__disabled__",
+            "action": null
+        },
+        "cct": {
+            "domain": "__disabled__",
+            "action": null
+        }
+    }
+}

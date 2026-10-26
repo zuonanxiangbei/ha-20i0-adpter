@@ -1,0 +1,24 @@
+{
+    "pid": "002",
+    "match_rules": [
+        {"type": "model_keyword", "keywords": ["zimi.waterheater."]}
+    ],
+    "services": {
+        "switch": {
+            "domain": "switch",
+            "action": "turn_on_off",
+            "value_attr": "state",
+            "exclude_keywords": ["提醒", "定时", "杀菌", "防冻"],
+            "include_keywords": ["开关"],
+            "name_keywords": ["开关状态", "开关"]
+        },
+        "brightness": {
+            "domain": "__disabled__",
+            "action": null
+        },
+        "cct": {
+            "domain": "__disabled__",
+            "action": null
+        }
+    }
+}

@@ -1,0 +1,24 @@
+{
+    "pid": "002",
+    "match_rules": [
+        {"type": "model_keyword", "keywords": ["cuco.plug."]}
+    ],
+    "services": {
+        "switch": {
+            "domain": "switch",
+            "action": "turn_on_off",
+            "value_attr": "state",
+            "exclude_keywords": ["提醒", "保护", "限制", "倒计时", "勿扰", "指示灯", "循环", "锁"],
+            "include_keywords": ["开关"],
+            "name_keywords": ["开关"]
+        },
+        "brightness": {
+            "domain": "__disabled__",
+            "action": null
+        },
+        "cct": {
+            "domain": "__disabled__",
+            "action": null
+        }
+    }
+}

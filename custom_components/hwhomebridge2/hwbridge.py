@@ -1559,7 +1559,15 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
     
     if ghass is None:
         return False
-    
+
+    # 复合 key 支持："<真实device_id>|<子实体entity_id>"
+    # 用途：一个 HA device 下有多路可控实体（如双开开关的左右两路）时，
+    # 每一路拆成一个独立虚拟设备，各自一个 SN，华为 App 里才会出现两个开关。
+    sub_entity = None
+    real_device_id = device_id
+    if "|" in device_id:
+        real_device_id, sub_entity = device_id.split("|", 1)
+
     # 防重复注册：如果设备已注册且不是更新场景，跳过
     if not is_update and device_id in registered_device_ids:
         _LOGGER.debug(f"Device {device_id} already registered, skip")
@@ -1572,14 +1580,14 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
         _LOGGER.info(f"Device {device_id} (sn={expected_sn}) is excluded, will register to SNManager only")
     device_reg = dr.async_get(ghass)
     entity_reg = er.async_get(ghass)
-    
-    device_entry = device_reg.async_get(device_id)
+
+    device_entry = device_reg.async_get(real_device_id)
     if not device_entry:
         _LOGGER.debug(f"Device {device_id} not found in registry")
         return False
-    
+
     # 收集该 device 下的所有 entity
-    device_entities = er.async_entries_for_device(entity_reg, device_id)
+    device_entities = er.async_entries_for_device(entity_reg, real_device_id)
     
     # 跳过没有实体的设备
     if not device_entities:
@@ -1588,6 +1596,10 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
     
     entity_list = []
     for entry in device_entities:
+        # 拆分场景：只保留指定的那一个子实体
+        if sub_entity is not None and entry.entity_id != sub_entity:
+            continue
+
         # 跳过来自反向桥接集成（如 huawei_smarthome）的实体，避免循环接入
         if getattr(entry, "platform", None) in SKIP_PLATFORMS:
             _LOGGER.debug(f"Skipping entity {entry.entity_id} from platform '{entry.platform}' to avoid bridge loop")
@@ -1618,6 +1630,16 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
     name = device_entry.name_by_user or device_entry.name or ""
     manufacturer = device_entry.manufacturer or ""
 
+    # 拆分场景：用子实体名做虚拟设备名，避免同一 device 拆出的多路同名
+    if sub_entity is not None:
+        sub_name = ""
+        for ent in entity_list:
+            if ent["entity_id"] == sub_entity and ent.get("name"):
+                sub_name = ent["name"]
+                break
+        name = sub_name or ((name + " " + sub_entity.split(".")[-1])
+                            if name else sub_entity)
+
     _LOGGER.debug(f"Registering device: id={device_id}, name={name}, model={model}, "
                   f"manufacturer={manufacturer}, entities={len(entity_list)}, "
                   f"reuse_sn={reuse_sn}, is_update={is_update}")
@@ -1625,12 +1647,13 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
     # 通过 ServiceRouter 注册（内部会通过 product_matcher 匹配）
     # 如果匹配失败，register_device 会返回 None
     vd = service_router.register_device(
-        device_id=device_id,
+        device_id=real_device_id,
         device_name=name,
         entity_list=entity_list,
         model=model,
         manufacturer=manufacturer,
-        reuse_sn=reuse_sn
+        reuse_sn=reuse_sn,
+        sn_seed=device_id
     )
 
     if vd is not None:
@@ -1665,11 +1688,94 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
 
         _LOGGER.info(f"Device registered, state sync deferred: sn={vd.sn}, device_id={device_id}, "
                      f"name={name}, model={model}")
+
+        # 多路可控实体拆分（如双开开关的第二路）
+        if sub_entity is None and not is_update:
+            _register_extra_controllables(real_device_id, vd)
+
         return True
     else:
         # 匹配失败，静默跳过
         _LOGGER.debug(f"Device {device_id} ({name}, model={model}) did not match any product, skipping")
         return False
+
+
+# ---------------------------------------------------------------------------
+# 多路可控实体拆分
+# ---------------------------------------------------------------------------
+
+# 允许被拆成独立虚拟设备的 domain（一个实体 = 一个可开关设备）
+_SPLIT_DOMAINS = {"switch", "light", "fan", "water_heater"}
+
+# 明显不是"主控开关"的实体名关键词（命中即跳过）
+_SPLIT_EXCLUDE = [
+    "防闪烁", "指示灯", "童锁", "物理控制", "勿扰", "延时", "倒计时",
+    "提醒", "保护", "限制", "循环", "定时", "锁", "提示音", "静音",
+    "模式", "fault", "异常", "接线", "wiring", "temperature", "温度",
+    "电压", "voltage", "水印", "追踪", "侦测", "检测", "报警", "画框",
+    "区域", "围栏", "授权", "息屏", "记忆", "保温", "杀菌", "防冻",
+    "预约", "凌动", "增减", "水印", "locked",
+]
+
+# 主控开关实体名必须包含其中之一
+_SPLIT_INCLUDE = ["开关", "on", "power", "relay", "socket", "插座", "风扇"]
+
+
+def _register_extra_controllables(device_id: str, first_vd) -> int:
+    """把同一个 HA device 下「尚未被映射」的多余可控实体各拆成一个虚拟设备
+
+    背景：一个 VirtualDevice 的一个 service 只能挂一个 entity，而小米双开
+    开关（xiaomi.switch.w2）在 HA 里是一个 device、两个 switch 实体
+    （左键/右键各控一路灯）。不拆的话第二路永远进不了华为 App。
+
+    做法：主虚拟设备映射走第一个实体后，把剩下的「像主控开关」的实体
+    用 "<device_id>|<entity_id>" 的复合 key 各注册一次，各自拿到独立 SN。
+    """
+    if service_router is None or ghass is None or first_vd is None:
+        return 0
+
+    entity_reg = er.async_get(ghass)
+    entries = er.async_entries_for_device(entity_reg, device_id)
+
+    used = {eid for eid in first_vd.get_all_entity_ids() if eid}
+    extra = []
+    for entry in entries:
+        eid = entry.entity_id
+        if eid in used:
+            continue
+        if entry.domain not in _SPLIT_DOMAINS:
+            continue
+        if getattr(entry, "platform", None) in SKIP_PLATFORMS:
+            continue
+
+        state = ghass.states.get(eid)
+        if state is not None and state.state == "unavailable":
+            continue
+
+        label = ((getattr(entry, "original_name", None) or "")
+                 or (state.name if state else "") or "").lower()
+        eid_l = eid.lower()
+        if any(k in label or k in eid_l for k in _SPLIT_EXCLUDE):
+            continue
+        if not any(k in label or k in eid_l for k in _SPLIT_INCLUDE):
+            continue
+        extra.append(eid)
+
+    if not extra:
+        return 0
+
+    _LOGGER.info(f"Device {device_id}: {len(extra)} extra controllable entities "
+                 f"will be split into separate virtual devices: {extra}")
+
+    count = 0
+    for eid in extra:
+        try:
+            if _register_single_device(f"{device_id}|{eid}"):
+                count += 1
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error(f"Failed to split-register {device_id}|{eid}: {exc}")
+
+    return count
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,24 @@
+{
+    "pid": "002",
+    "match_rules": [
+        {"type": "model_keyword", "keywords": ["xiaomi.switch.w1", "xiaomi.switch.w2", "xiaomi.switch.w3", "xiaomi.switch.w4"]}
+    ],
+    "services": {
+        "switch": {
+            "domain": "switch",
+            "action": "turn_on_off",
+            "value_attr": "state",
+            "exclude_keywords": ["防闪烁", "指示灯", "凌动", "童锁", "物理控制"],
+            "include_keywords": ["开关"],
+            "name_keywords": ["开关"]
+        },
+        "brightness": {
+            "domain": "__disabled__",
+            "action": null
+        },
+        "cct": {
+            "domain": "__disabled__",
+            "action": null
+        }
+    }
+}

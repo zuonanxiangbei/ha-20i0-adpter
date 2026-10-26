@@ -66,7 +66,8 @@ class ServiceRouter:
     def register_device(self, device_id: str, device_name: str,
                         entity_list: list, model: str = "",
                         manufacturer: str = "",
-                        reuse_sn: str = None) -> Optional[VirtualDevice]:
+                        reuse_sn: str = None,
+                        sn_seed: str = None) -> Optional[VirtualDevice]:
         """注册一个 HA device 到服务路由中
 
         执行以下步骤：
@@ -120,7 +121,9 @@ class ServiceRouter:
             sn = reuse_sn
         else:
             # 新设备：生成新 SN
-            sn = SNManager.generate_sn(device_id)
+            # sn_seed 用于「一个 HA device 拆成多个虚拟设备」的场景，
+            # 保证每个虚拟设备拿到稳定且互不相同的 SN
+            sn = SNManager.generate_sn(sn_seed or device_id)
         
         vd = VirtualDevice(sn=sn, product=product, ha_device_id=device_id)
 
@@ -195,6 +198,11 @@ class ServiceRouter:
         """
         mapping = svc_def.ha_mapping
         if not mapping or not mapping.domain:
+            return None
+
+        # 约定：适配器把 domain 写成 "__" 开头表示"本适配器不提供该服务"
+        # 用于覆盖厂家适配器后关掉框架层多余的 service（如灯泡的 brightness/cct）
+        if mapping.domain.startswith("__"):
             return None
 
         # Level 1: domain 过滤（必须匹配）
