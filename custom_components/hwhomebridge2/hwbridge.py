@@ -260,6 +260,67 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
     service_router.set_hass(hass)
     service_router.set_lib(lib)
 
+    # ===== 网卡探测 + 指定首选网卡 =====
+    # proot 环境里 netlink / getifaddrs 不可用（ip 命令报 Socket not connected，
+    # /proc/net/* 全是 Permission denied），SDK 可能因此拿不到本机网卡而不开监听。
+    # 这里用不打 netlink 的 SIOCGIFCONF ioctl 枚举网卡，并显式告诉 SDK 用哪块。
+    try:
+        import struct as _st
+        import fcntl as _fc
+        import array as _ar
+
+        _ifaces = []
+        try:
+            _sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            _maxlen = 8192
+            _buf = _ar.array("B", b"\0" * _maxlen)
+            _SIOCGIFCONF = 0x8912
+            _ifc = _st.pack("iL", _maxlen, _buf.buffer_info()[0])
+            _res = _fc.ioctl(_sk.fileno(), _SIOCGIFCONF, _ifc)
+            _outlen = _st.unpack("iL", _res)[0]
+            _raw = _buf.tobytes()[:_outlen]
+            for _i in range(0, len(_raw), 32):
+                _rec = _raw[_i:_i + 32]
+                if len(_rec) < 32:
+                    break
+                _nm = _rec[:16].split(b"\0")[0].decode("utf-8", "replace")
+                _ip = socket.inet_ntoa(_rec[20:24])
+                if _nm:
+                    _ifaces.append((_nm, _ip))
+            _sk.close()
+        except Exception as _e:
+            _LOGGER.error("IFACE| SIOCGIFCONF failed: %s" % _e)
+
+        try:
+            _LOGGER.error("IFACE| if_nameindex: %s" % (socket.if_nameindex(),))
+        except Exception as _e:
+            _LOGGER.error("IFACE| if_nameindex failed: %s" % _e)
+
+        _LOGGER.error("IFACE| SIOCGIFCONF list: %s" % (_ifaces,))
+
+        _pick = None
+        for _n, _ip in _ifaces:
+            if (_ip.startswith("192.168.") or _ip.startswith("10.")
+                    or _ip.startswith("172.")):
+                _pick = (_n, _ip)
+                break
+        if _pick is None and _ifaces:
+            _pick = _ifaces[0]
+
+        if _pick is not None:
+            try:
+                lib.HILINK_SetPreferredIface.argtypes = [c_char_p]
+                lib.HILINK_SetPreferredIface.restype = c_int
+                _r = lib.HILINK_SetPreferredIface(_pick[0].encode())
+                _LOGGER.error("IFACE| SetPreferredIface(%r, ip=%s) rlt=%r"
+                              % (_pick[0], _pick[1], _r))
+            except Exception as _e:
+                _LOGGER.error("IFACE| SetPreferredIface EXC %s" % _e)
+        else:
+            _LOGGER.error("IFACE| no usable interface detected")
+    except Exception as _e:
+        _LOGGER.error("IFACE| probe EXC %s" % _e)
+
     # 启动 C 库
     rlt = lib.main()
     _LOGGER.info(f"start hilink bridge rlt={rlt}.")

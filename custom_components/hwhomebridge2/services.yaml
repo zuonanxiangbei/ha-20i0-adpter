@@ -1,0 +1,23 @@
+netdiag:
+  name: 网络诊断
+  description: 把网卡列表、组播成员、组播回环自测结果写入 ERROR 日志。
+
+sniff:
+  name: UDP 抓包
+  description: 在指定 UDP 端口监听并加入组播组，把收到的每个包写入 ERROR 日志（用于判断发现请求是否到达本机）。
+  fields:
+    seconds:
+      name: 抓包时长（秒）
+      description: 抓包窗口长度
+      default: 90
+      selector:
+        number:
+          min: 5
+          max: 600
+          unit_of_measurement: s
+    ports:
+      name: 端口
+      description: 要监听的 UDP 端口，默认 5683/5686/5687
+      default: [5683, 5686, 5687]
+      selector:
+        object:
