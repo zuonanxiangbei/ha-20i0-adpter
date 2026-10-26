@@ -1,11 +1,11 @@
-# ha-20i0-adpter — HA 华为生态集成合集
+# ha-20i0-adpter — HA 设备接入华为智慧生活（hwhomebridge2）
 
-本仓库包含两个 Home Assistant 自定义集成：
+把 Home Assistant 里的设备桥接到**华为智慧生活 App / 小艺语音**。
+基于上游 [`Wangxiaokang666-666/ha_hwhomebridge`](https://github.com/Wangxiaokang666-666/ha_hwhomebridge) v1.0.1 的 proot/noexec 兼容修改版，域名为 `hwhomebridge2`，与原版 `hwhomebridge` 互不冲突。
 
-| 集成 | 作用 | 状态 |
-|---|---|---|
-| `hwhomebridge2` | 把 HA 里的设备桥接到**华为智慧生活 App / 小艺语音**（基于上游 `Wangxiaokang666-666/ha_hwhomebridge` v1.0.1 的 proot/noexec 兼容修改版） | 主力 |
-| `huawei_20i0_adapter` | 欧普智能台灯 Pro（prodId `20I0`）适配器安装器 | 备用 / legacy |
+> **台灯适配器说明**：本仓库早先托管 `huawei_20i0_adapter`（欧普台灯 Pro 适配器安装器）。
+> 因 HACS 一个仓库只能安装 `custom_components/` 下的**第一个**集成，该适配器已从 `custom_components/` 移出，
+> 文件保留在仓库 `huawei_20I0_installer/` 目录，需要时手动拷贝。
 
 > **⚠️ 非 Home Assistant 官方集成**，处于持续迭代中，存在适配兼容与稳定性风险，请勿直接用于生产环境。
 
@@ -18,8 +18,8 @@
 3. 在集成列表找到「**华为智慧生活桥接**」→ 下载 → **重启 HA**
 4. 设置 → 设备与服务 → **添加集成** → 搜索 `HuaweiHome Bridge 2`
 
-> 注意：下载本仓库会同时安装 `huawei_20i0_adapter`（台灯适配器安装器）。
-> 如不需要，忽略即可——不配置它不会产生任何实体或副作用。
+> 注意：本仓库的 `custom_components/` 下现在**只有** `hwhomebridge2` 一个集成，HACS 会正确安装它。
+> 若 HACS 里之前添加过本仓库并装成了别的集成，**先删除自定义仓库再重新添加一次**，强制刷新元数据。
 
 ---
 

@@ -1,7 +1,7 @@
 {
-  "name": "华为智慧生活桥接（hwhomebridge2 + 20i0 适配器）",
+  "name": "华为智慧生活桥接（hwhomebridge2）",
   "render_readme": true,
   "homeassistant": "2023.1.0",
-  "domains": ["hwhomebridge2", "huawei_20i0_adapter"],
+  "domains": ["hwhomebridge2"],
   "content_in_root": false
 }
