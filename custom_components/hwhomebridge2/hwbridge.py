@@ -443,7 +443,7 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         _LOGGER.error("PROBE|B udp: " + _run2("cat /proc/net/udp 2>&1 | head -30"))
         _LOGGER.error("PROBE|C addr: " + _run2("ip -o -4 addr 2>&1 | head -8; cat /proc/net/route 2>&1 | head -5"))
         _LOGGER.error("PROBE|D igmp: " + _run2("cat /proc/net/igmp 2>&1 | head -15"))
-        _LOGGER.error("PROBE|E rundir: " + _run2("ls -la /config/.storage/hwhomebridge2/config/ 2>&1 | head -20"))
+        _LOGGER.error("PROBE|E rundir: " + _run2("ls -la /config/.storage/hwhomebridge2/config/ 2>&1"))
 
         # SDK 状态快照：线程 / fd / 网关 SN / 设备状态
         try:
@@ -466,6 +466,40 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             _LOGGER.error("PROBE|K devStatus=%r" % (_dstat,))
         except Exception as _e:
             _LOGGER.error("PROBE|K devStatus EXC %s" % _e)
+
+        # ===== 网卡 MAC / IP：SDK 靠 ioctl 拿 MAC，拿不到就整个链路不启动 =====
+        _myip = None
+        try:
+            import fcntl as _fc2
+            _skx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            for _nm in [x for x in (_pickname, "wlan0", "lo") if x]:
+                _req = _nm.encode().ljust(16, b"\0") + b"\0" * 24  # struct ifreq 40B
+                try:
+                    _rb = _fc2.ioctl(_skx.fileno(), 0x8927, _req)  # SIOCGIFHWADDR
+                    _mac = ":".join("%02x" % b for b in _rb[18:24])
+                    _fam = int.from_bytes(_rb[16:18], "little")
+                    _LOGGER.error("PROBE|V SIOCGIFHWADDR(%s) = %s fam=%d" % (_nm, _mac, _fam))
+                except Exception as _e:
+                    _LOGGER.error("PROBE|V SIOCGIFHWADDR(%s) FAIL %s" % (_nm, _e))
+                try:
+                    _rb = _fc2.ioctl(_skx.fileno(), 0x8915, _req)  # SIOCGIFADDR
+                    _ip = socket.inet_ntoa(_rb[20:24])
+                    if _nm == _pickname:
+                        _myip = _ip
+                    _LOGGER.error("PROBE|V SIOCGIFADDR(%s) = %s" % (_nm, _ip))
+                except Exception as _e:
+                    _LOGGER.error("PROBE|V SIOCGIFADDR(%s) FAIL %s" % (_nm, _e))
+            _skx.close()
+        except Exception as _e:
+            _LOGGER.error("PROBE|V EXC %s" % _e)
+
+        # 有些版本的 SDK 期待「IP 字符串」而不是网卡名，再试一次
+        if _myip:
+            try:
+                _ri = lib.HILINK_SetPreferredIface(_myip.encode())
+                _LOGGER.error("IFACE| SetPreferredIface(by IP %r) rlt=%r" % (_myip, _ri))
+            except Exception as _e:
+                _LOGGER.error("IFACE| SetPreferredIface(by IP) EXC %s" % _e)
 
         # 云侧可达性：SDK 若连不上华为云，可能直接放弃起监听
         try:
