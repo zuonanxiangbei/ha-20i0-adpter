@@ -75,8 +75,79 @@ async def _async_register_diag_service(hass: HomeAssistant) -> None:
     async def _handle(call):  # noqa: ARG001
         await _async_netdiag_log()
 
+    async def _handle_sniff(call):
+        seconds = int(call.data.get("seconds", 90))
+        ports = call.data.get("ports") or [5683, 5686, 5687]
+        await _async_sniff_start(hass, seconds, [int(p) for p in ports])
+
     hass.services.async_register(DOMAIN, DIAG_SERVICE, _handle)
-    _LOGGER.info("netdiag service registered")
+    hass.services.async_register(DOMAIN, "sniff", _handle_sniff)
+    _LOGGER.info("netdiag/sniff service registered")
+
+
+
+async def _async_sniff_start(hass: HomeAssistant, seconds: int, ports: list) -> None:
+    """在后台线程监听指定 UDP 端口，把收到的每个包写入 ERROR 日志。
+
+    用途：判断华为智慧生活 App 的发现请求到底有没有到达本机。
+    """
+    import socket as sock_mod
+    import struct as struct_mod
+    import threading
+    import time as time_mod
+
+    def worker():
+        socks = []
+        for port in ports:
+            try:
+                s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_DGRAM,
+                                    sock_mod.IPPROTO_UDP)
+                s.setsockopt(sock_mod.SOL_SOCKET, sock_mod.SO_REUSEADDR, 1)
+                s.bind(("0.0.0.0", port))
+                try:
+                    mreq = struct_mod.pack(
+                        "4s4s",
+                        sock_mod.inet_aton("238.238.238.238"),
+                        sock_mod.inet_aton("0.0.0.0"),
+                    )
+                    s.setsockopt(sock_mod.IPPROTO_IP, sock_mod.IP_ADD_MEMBERSHIP, mreq)
+                    joined = "joined-mcast"
+                except Exception as e:  # noqa: BLE001
+                    joined = "join-fail:%s" % e
+                s.settimeout(0.5)
+                socks.append((port, s))
+                _LOGGER.error("SNIFF|listen port=%d OK (%s)" % (port, joined))
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.error("SNIFF|listen port=%d FAIL %s (端口被占用?)" % (port, e))
+
+        if not socks:
+            _LOGGER.error("SNIFF|no socket bound, abort")
+            return
+
+        _LOGGER.error("SNIFF|started, %d port(s), %ds window" % (len(socks), seconds))
+        end = time_mod.time() + seconds
+        count = 0
+        while time_mod.time() < end and count < 200:
+            for port, s in socks:
+                try:
+                    data, addr = s.recvfrom(2048)
+                except sock_mod.timeout:
+                    continue
+                except Exception:  # noqa: BLE001
+                    continue
+                count += 1
+                _LOGGER.error(
+                    "SNIFF|pkt port=%d from=%s:%d len=%d hex=%s"
+                    % (port, addr[0], addr[1], len(data), data[:32].hex()))
+        for _, s in socks:
+            try:
+                s.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _LOGGER.error("SNIFF|done total=%d" % count)
+
+    threading.Thread(target=worker, daemon=True).start()
+
 
 
 

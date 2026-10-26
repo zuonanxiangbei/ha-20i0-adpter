@@ -281,7 +281,7 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
             except Exception as _e:
                 return "EXC %s" % _e
 
-        _time.sleep(4)  # 等 SDK 线程起监听
+        await asyncio.sleep(4)  # 等 SDK 线程起监听
         _LOGGER.error("PROBE|A main() rlt=%r" % (rlt,))
         _LOGGER.error("PROBE|B udp: " + _run2("cat /proc/net/udp 2>&1 | head -30"))
         _LOGGER.error("PROBE|C addr: " + _run2("ip -o -4 addr 2>&1 | head -8; cat /proc/net/route 2>&1 | head -5"))
